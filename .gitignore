@@ -32,7 +32,6 @@ htmlcov/
 *.swo
 
 # Local config & data
-custom_prompts.csv
 *.log
 
 # Type checking

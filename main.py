@@ -11,6 +11,11 @@ def main():
     os.environ["QT_API"] = "pyside6"
     os.environ["DEBUG_AI"] = "1" if DEBUG else "0"
     
+    if getattr(sys, 'frozen', False):
+        # Running in a PyInstaller bundle
+        app_dir = sys._MEIPASS if hasattr(sys, '_MEIPASS') else os.path.dirname(sys.executable)
+        os.chdir(app_dir)
+        
     app = QApplication(sys.argv)
     app.setApplicationName("AI PDF Viewer")
     
