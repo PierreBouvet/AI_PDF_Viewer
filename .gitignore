@@ -1,0 +1,40 @@
+# Byte-compiled / optimized / DLL files
+__pycache__/
+*.py[cod]
+*$py.class
+
+# Virtual Environments
+.venv/
+venv/
+env/
+ENV/
+
+# macOS specific
+.DS_Store
+.AppleDouble
+.LSOverride
+
+# PyInstaller
+build/
+dist/
+*.spec
+
+# Pytest
+.pytest_cache/
+.coverage
+htmlcov/
+*.tox
+
+# IDEs
+.vscode/
+.idea/
+*.swp
+*.swo
+
+# Local config & data
+custom_prompts.csv
+*.log
+
+# Type checking
+.mypy_cache/
+.pyre/
