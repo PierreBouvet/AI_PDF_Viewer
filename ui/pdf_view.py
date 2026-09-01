@@ -80,11 +80,13 @@ class PDFView(QGraphicsView):
         self.scene = QGraphicsScene(self)
         self.setScene(self.scene)
         
-        # Appearance settings
-        self.setBackgroundBrush(Qt.GlobalColor.darkGray)
+        from ui.theme_manager import ThemeManager
+        self.setBackgroundBrush(ThemeManager.get_pdf_bg_color())
         self.setRenderHint(QPainter.RenderHint.Antialiasing)
         self.setRenderHint(QPainter.RenderHint.SmoothPixmapTransform)
         self.setDragMode(QGraphicsView.DragMode.RubberBandDrag)
+        self.setTransformationAnchor(QGraphicsView.ViewportAnchor.AnchorViewCenter)
+        self.setResizeAnchor(QGraphicsView.ViewportAnchor.AnchorViewCenter)
         
         self.document = None
         self.current_page = 0
@@ -97,6 +99,10 @@ class PDFView(QGraphicsView):
         self.reload_timer = QTimer(self)
         self.reload_timer.setSingleShot(True)
         self.reload_timer.timeout.connect(self._reload_visible)
+        
+    def update_theme(self, app_style: str = "Native macOS", color_mode: str = "Light"):
+        from ui.theme_manager import ThemeManager
+        self.setBackgroundBrush(ThemeManager.get_pdf_bg_color(app_style, color_mode))
         
     def dragEnterEvent(self, event):
         event.ignore()
@@ -202,6 +208,12 @@ class PDFView(QGraphicsView):
         self.check_visibility()
         
     def resizeEvent(self, event):
+        old_size = event.oldSize()
+        new_size = event.size()
+        if self.document and old_size.isValid() and old_size.width() > 0 and new_size.width() > 0 and old_size.width() != new_size.width():
+            scale_factor = new_size.width() / old_size.width()
+            self.scale(scale_factor, scale_factor)
+            self._debounce_reload()
         super().resizeEvent(event)
         self.check_visibility()
         

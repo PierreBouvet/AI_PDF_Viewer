@@ -24,7 +24,7 @@ def test_singleton_instance(clean_settings):
     assert config1 is config2
 
 def test_model_name_default(clean_settings):
-    assert clean_settings.model_name == "gemini-3.5-flash"
+    assert clean_settings.model_name == "gemini-3.5-flash-lite"
 
 def test_model_name_setter(clean_settings):
     clean_settings.model_name = "gemini-2.5-pro"
@@ -43,3 +43,33 @@ def test_ai_font_size_default(clean_settings):
 def test_ai_font_size_setter(clean_settings):
     clean_settings.ai_font_size = 14
     assert clean_settings.ai_font_size == 14
+
+def test_app_style_default_and_setter(clean_settings):
+    assert clean_settings.app_style == "Native macOS"
+    clean_settings.app_style = "Adobe Acrobat"
+    assert clean_settings.app_style == "Adobe Acrobat"
+
+def test_color_mode_default_and_setter(clean_settings):
+    assert clean_settings.color_mode == "System (Auto)"
+    clean_settings.color_mode = "Dark"
+    assert clean_settings.color_mode == "Dark"
+
+def test_theme_manager_resolve_mode():
+    from ui.theme_manager import ThemeManager
+    assert ThemeManager.resolve_color_mode("Light") == "Light"
+    assert ThemeManager.resolve_color_mode("Dark") == "Dark"
+    assert ThemeManager.resolve_color_mode("System (Auto)") in ["Light", "Dark"]
+
+def test_theme_manager_palettes():
+    from ui.theme_manager import ThemeManager
+    for style in ["Native macOS", "Adobe Acrobat", "Minimalist"]:
+        for mode in ["System (Auto)", "Light", "Dark"]:
+            p = ThemeManager.get_palette(style, mode)
+            assert "bg_window" in p
+            assert "accent" in p
+            assert "pdf_bg" in p
+            css = ThemeManager.get_stylesheet(style, mode)
+            assert len(css) > 50
+            chat_css = ThemeManager.get_chat_css(style, mode, "Optima", 11)
+            assert len(chat_css) > 50
+

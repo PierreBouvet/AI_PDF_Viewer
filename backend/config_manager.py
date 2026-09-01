@@ -36,3 +36,21 @@ class ConfigManager:
     @ai_font_size.setter
     def ai_font_size(self, value: int):
         self.settings.setValue("ai_font_size", value)
+
+    @property
+    def app_style(self) -> str:
+        return str(self.settings.value("app_style", "Native macOS"))
+
+    @app_style.setter
+    def app_style(self, value: str):
+        self.settings.setValue("app_style", value)
+        self.settings.sync()
+
+    @property
+    def color_mode(self) -> str:
+        return str(self.settings.value("color_mode", "System (Auto)"))
+
+    @color_mode.setter
+    def color_mode(self, value: str):
+        self.settings.setValue("color_mode", value)
+        self.settings.sync()

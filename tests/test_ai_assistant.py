@@ -44,7 +44,9 @@ def test_rank_available_models(mock_genai, mock_qsettings):
         def text(self):
             return json.dumps(["models/gemini-2.5-flash", "models/gemini-3.5-flash", "models/gemini-3.5-flash-lite"])
             
-    mock_client.models.generate_content.return_value = DummyResponse()
+    mock_chat = MagicMock()
+    mock_client.chats.create.return_value = mock_chat
+    mock_chat.send_message.return_value = DummyResponse()
     
     assistant.rank_available_models()
     
@@ -60,8 +62,10 @@ def test_ask_direct_error_raising(mock_genai):
     mock_client = MagicMock()
     mock_genai.Client.return_value = mock_client
     
-    # Force an exception when calling generate_content
-    mock_client.models.generate_content.side_effect = Exception("429 Quota Exceeded")
+    # Force an exception when calling send_message
+    mock_chat = MagicMock()
+    mock_client.chats.create.return_value = mock_chat
+    mock_chat.send_message.side_effect = Exception("429 Quota Exceeded")
     
     assistant._initialize_models()
     

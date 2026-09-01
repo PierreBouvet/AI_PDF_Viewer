@@ -33,6 +33,8 @@ class ChatWebPage(QWebEnginePage):
             return
         super().javaScriptConsoleMessage(level, message, lineNumber, sourceId)
 
+from ui.theme_manager import ThemeManager
+
 class AIChatPanel(QWidget):
     message_sent = Signal(str, bool, str)
     open_prompts_dialog = Signal()
@@ -41,10 +43,12 @@ class AIChatPanel(QWidget):
     fallback_model_selected = Signal(str)
     append_requested = Signal(dict)
     
-    def __init__(self, parent=None):
+    def __init__(self, parent=None, app_style="Native macOS", color_mode="Light"):
         super().__init__(parent)
-        self.setMinimumWidth(300)
+        self.setMinimumWidth(0)
         
+        self.app_style = app_style
+        self.color_mode = color_mode
         self.font_family = "Optima"
         self.font_size = 11
         
@@ -136,9 +140,31 @@ class AIChatPanel(QWidget):
         self.set_index_status("unloaded")
         
     def update_font(self, font_family: str, font_size: int):
-        self.font_family = font_family
-        self.font_size = font_size
-        js = f"document.body.style.fontFamily = '{font_family}', 'sans-serif'; document.body.style.fontSize = '{font_size}pt';"
+        self.update_theme(font_family=font_family, font_size=font_size)
+
+    def update_theme(self, app_style: str = None, color_mode: str = None, font_family: str = None, font_size: int = None):
+        if app_style is not None:
+            self.app_style = app_style
+        if color_mode is not None:
+            self.color_mode = color_mode
+        if font_family is not None:
+            self.font_family = font_family
+        if font_size is not None:
+            self.font_size = font_size
+            
+        css = ThemeManager.get_chat_css(self.app_style, self.color_mode, self.font_family, self.font_size)
+        css_escaped = css.replace("\\", "\\\\").replace("`", "\\`").replace("$", "\\$")
+        js = f"""
+        (function() {{
+            let styleTag = document.getElementById('custom-theme-style');
+            if (!styleTag) {{
+                styleTag = document.createElement('style');
+                styleTag.id = 'custom-theme-style';
+                document.head.appendChild(styleTag);
+            }}
+            styleTag.textContent = `{css_escaped}`;
+        }})();
+        """
         self.web_view.page().runJavaScript(js)
         
     def _on_index_clicked(self):
@@ -224,6 +250,7 @@ class AIChatPanel(QWidget):
         self.web_view.page().runJavaScript("hideLoading();")
             
     def _get_html_template(self):
+        chat_css = ThemeManager.get_chat_css(self.app_style, self.color_mode, self.font_family, self.font_size)
         html = """
         <!DOCTYPE html>
         <html>
@@ -244,91 +271,11 @@ class AIChatPanel(QWidget):
             };
             </script>
             <script src="https://cdn.jsdelivr.net/npm/mathjax@3/es5/tex-mml-chtml.js"></script>
-            <style>
-                body {
-                    font-family: '__FONT_FAMILY__', sans-serif;
-                    font-size: __FONT_SIZE__pt;
-                    color: #333;
-                    background-color: #fff;
-                    padding: 10px;
-                    margin: 0;
-                    line-height: 1.5;
-                }
-                .message {
-                    margin-bottom: 15px;
-                    padding: 10px 15px;
-                    border-radius: 8px;
-                    max-width: 90%;
-                    word-wrap: break-word;
-                }
-                .user-message {
-                    background-color: #007aff;
-                    color: white;
-                    align-self: flex-end;
-                    margin-left: auto;
-                }
-                .ai-message {
-                    background-color: #f1f1f1;
-                    color: black;
-                }
-                .system-message {
-                    color: #888;
-                    font-style: italic;
-                    text-align: center;
-                    font-size: 9pt;
-                    margin-bottom: 10px;
-                }
-                
-                .ai-message code {
-                    background-color: #e5e5e5;
-                    padding: 2px 4px;
-                    border-radius: 4px;
-                    font-family: monospace;
-                }
-                .ai-message pre {
-                    background-color: #2b2b2b;
-                    color: #f8f8f2;
-                    padding: 10px;
-                    border-radius: 6px;
-                    overflow-x: auto;
-                }
-                .ai-message pre code {
-                    background-color: transparent;
-                    color: inherit;
-                    padding: 0;
-                }
-                .ai-message p {
-                    margin-top: 0;
-                }
-                #chat-container {
-                    display: flex;
-                    flex-direction: column;
-                }
-                
-                .explain-section {
-                    border: 1px solid #ccc;
-                    padding: 10px;
-                    margin-top: 5px;
-                    background-color: #fafafa;
-                    border-radius: 5px;
-                }
-                .discuss-section {
-                    border: 1px solid #0078D7;
-                    padding: 10px;
-                    margin-top: 5px;
-                    background-color: #E5F1FB;
-                    border-radius: 5px;
-                }
-                .summary-section {
-                    border: 1px solid #107C10;
-                    padding: 10px;
-                    margin-top: 5px;
-                    background-color: #DFF6DD;
-                    border-radius: 5px;
-                }
+            <style id="custom-theme-style">
+                __CHAT_CSS__
                 .loading-indicator {
                     font-style: italic;
-                    color: #666;
+                    color: #888;
                 }
                 .dots::after {
                     content: '';
@@ -540,7 +487,7 @@ class AIChatPanel(QWidget):
         </body>
         </html>
         """
-        return html.replace("__FONT_FAMILY__", self.font_family).replace("__FONT_SIZE__", str(self.font_size))
+        return html.replace("__CHAT_CSS__", chat_css)
 
     def add_user_message(self, message: str):
         js = f"addMessage('user', {json.dumps(message)}, false);"

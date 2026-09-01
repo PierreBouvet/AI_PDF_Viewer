@@ -1,7 +1,7 @@
 import os
 import keyring
-from PySide6.QtWidgets import (QMainWindow, QSplitter, QFileDialog, 
-                               QToolBar, QMessageBox, QGraphicsView)
+from PySide6.QtWidgets import (QMainWindow, QSplitter, QSplitterHandle, QFileDialog, 
+                               QToolBar, QMessageBox, QGraphicsView, QPushButton)
 from PySide6.QtCore import Qt, QThread, Signal, QObject, QTimer
 from PySide6.QtGui import QAction
 from PySide6.QtWebEngineCore import QWebEnginePage
@@ -15,6 +15,154 @@ from backend.ai_assistant import AIAssistant
 from backend.prompts_manager import PromptsManager
 from ui.prompts_dialog import PromptsDialog
 from backend.config_manager import ConfigManager
+
+class MainSplitterHandle(QSplitterHandle):
+    def __init__(self, orientation, parent):
+        super().__init__(orientation, parent)
+        self.btn = None
+        self.handle_type = None
+        self.last_width = 200
+        
+    def setup_collapse_button(self, handle_type: str):
+        if self.btn is not None:
+            return
+        self.handle_type = handle_type
+        if handle_type == "thumb":
+            init_text = "<"
+            init_tip = "Collapse thumbnails"
+            self.last_width = 171
+        else:
+            init_text = ">"
+            init_tip = "Collapse AI chat"
+            self.last_width = 343
+            
+        self.btn = QPushButton(init_text, self)
+        self.btn.setFixedSize(14, 22)
+        self.btn.setCursor(Qt.CursorShape.PointingHandCursor)
+        self.btn.setToolTip(init_tip)
+        self.btn.setStyleSheet("""
+            QPushButton {
+                background-color: rgba(220, 220, 220, 200);
+                border: 1px solid #b0b0b0;
+                border-radius: 3px;
+                font-weight: bold;
+                font-size: 8pt;
+                padding: 0px;
+                margin: 0px;
+                color: #444444;
+            }
+            QPushButton:hover {
+                background-color: #0288d1;
+                color: white;
+                border-color: #0277bd;
+            }
+        """)
+        self.btn.clicked.connect(self.toggle_collapse)
+        self.update_position()
+        
+    def resizeEvent(self, event):
+        super().resizeEvent(event)
+        self.update_position()
+        
+    def update_position(self):
+        if self.btn:
+            bx = (self.width() - self.btn.width()) // 2
+            by = (self.height() // 2) + 18
+            self.btn.move(bx, by)
+            
+    def update_state(self, collapsed: bool):
+        if self.btn and self.handle_type:
+            if self.handle_type == "thumb":
+                if collapsed:
+                    self.btn.setText(">")
+                    self.btn.setToolTip("Expand thumbnails")
+                else:
+                    self.btn.setText("<")
+                    self.btn.setToolTip("Collapse thumbnails")
+            else:
+                if collapsed:
+                    self.btn.setText("<")
+                    self.btn.setToolTip("Expand AI chat")
+                else:
+                    self.btn.setText(">")
+                    self.btn.setToolTip("Collapse AI chat")
+                
+    def toggle_collapse(self):
+        s = self.splitter()
+        sizes = s.sizes()
+        if len(sizes) < 3:
+            return
+        if self.handle_type == "thumb":
+            if sizes[0] > 20:
+                self.last_width = sizes[0]
+                new_sizes = [0, sizes[1] + sizes[0], sizes[2]]
+                s.setStretchFactor(0, 0)
+                s.setSizes(new_sizes)
+                self.update_state(collapsed=True)
+            else:
+                w = self.last_width if self.last_width > 50 else 171
+                new_sizes = [w, max(100, sizes[1] - w), sizes[2]]
+                s.setStretchFactor(0, 1)
+                s.setSizes(new_sizes)
+                self.update_state(collapsed=False)
+        else:
+            if sizes[2] > 20:
+                self.last_width = sizes[2]
+                new_sizes = [sizes[0], sizes[1] + sizes[2], 0]
+                s.setStretchFactor(2, 0)
+                s.setSizes(new_sizes)
+                self.update_state(collapsed=True)
+            else:
+                w = self.last_width if self.last_width > 50 else 340
+                new_sizes = [sizes[0], max(100, sizes[1] - w), w]
+                s.setStretchFactor(2, 2)
+                s.setSizes(new_sizes)
+                self.update_state(collapsed=False)
+        if hasattr(s, "panel_states_changed"):
+            s.panel_states_changed.emit()
+
+class MainSplitter(QSplitter):
+    panel_states_changed = Signal()
+    
+    def __init__(self, orientation=Qt.Orientation.Horizontal, parent=None):
+        super().__init__(orientation, parent)
+        self.splitterMoved.connect(self._on_moved)
+        
+    def createHandle(self):
+        return MainSplitterHandle(self.orientation(), self)
+        
+    def init_handles(self):
+        if self.count() >= 3:
+            h1 = self.handle(1)
+            if isinstance(h1, MainSplitterHandle):
+                h1.setup_collapse_button("thumb")
+            h2 = self.handle(2)
+            if isinstance(h2, MainSplitterHandle):
+                h2.setup_collapse_button("chat")
+                
+    def _on_moved(self, pos, index):
+        sizes = self.sizes()
+        if index == 1:
+            h = self.handle(1)
+            if isinstance(h, MainSplitterHandle):
+                if sizes[0] <= 20:
+                    self.setStretchFactor(0, 0)
+                    h.update_state(collapsed=True)
+                else:
+                    self.setStretchFactor(0, 1)
+                    h.last_width = sizes[0]
+                    h.update_state(collapsed=False)
+        elif index == 2:
+            h = self.handle(2)
+            if isinstance(h, MainSplitterHandle):
+                if sizes[2] <= 20:
+                    self.setStretchFactor(2, 0)
+                    h.update_state(collapsed=True)
+                else:
+                    self.setStretchFactor(2, 2)
+                    h.last_width = sizes[2]
+                    h.update_state(collapsed=False)
+        self.panel_states_changed.emit()
 
 class WorkerThread(QThread):
     result_ready = Signal(str, str, str, str)
@@ -141,7 +289,8 @@ class MainWindow(QMainWindow):
         self.startup_thread.start()
         
         # Central Splitter
-        self.splitter = QSplitter(Qt.Orientation.Horizontal)
+        self.splitter = MainSplitter(Qt.Orientation.Horizontal)
+        self.splitter.setHandleWidth(12)
         
         # Log Bar
         from PySide6.QtWidgets import QListWidget, QWidget, QVBoxLayout
@@ -195,13 +344,18 @@ class MainWindow(QMainWindow):
         self.pdf_container.addWidget(self.placeholder_widget)
         self.pdf_container.addWidget(self.pdf_view)
         
-        self.chat_panel = AIChatPanel()
+        from ui.theme_manager import ThemeManager
+        self.chat_panel = AIChatPanel(app_style=self.config.app_style, color_mode=self.config.color_mode)
         self.chat_panel.set_prompts(self.prompts_manager.load_prompts())
         self.chat_panel.update_font(self.ai_font_family, self.ai_font_size)
         
         self.splitter.addWidget(self.thumbnail_panel)
         self.splitter.addWidget(self.pdf_container)
         self.splitter.addWidget(self.chat_panel)
+        
+        self.splitter.setCollapsible(0, True)
+        self.splitter.setCollapsible(1, False)
+        self.splitter.setCollapsible(2, True)
         
         # Adjust proportions: Thumbnails(1), PDF(4), Chat(2)
         # Chat is 2x thumbnails, PDF is 2x chat
@@ -212,6 +366,7 @@ class MainWindow(QMainWindow):
         # setSizes actually sets the initial width in pixels (Window width is 1200)
         # 1200 * (1/7) = 171, 1200 * (4/7) = 686, 1200 * (2/7) = 343
         self.splitter.setSizes([171, 686, 343])
+        self.splitter.init_handles()
         
         # Toolbar
         self.toolbar = QToolBar("Main Toolbar")
@@ -220,7 +375,6 @@ class MainWindow(QMainWindow):
         from PySide6.QtWidgets import QWidget, QSizePolicy, QPushButton
         
         self.open_action = QPushButton("Open PDF")
-        self.open_action.setStyleSheet("background-color: #dcdcdc; color: #000000; font-weight: 500; border: none; border-radius: 4px; padding: 3px 12px; margin: 0px;")
         self.open_action.clicked.connect(self.open_pdf)
         self.toolbar.addWidget(self.open_action)
         
@@ -228,23 +382,26 @@ class MainWindow(QMainWindow):
         
         self.mode_action = QPushButton("Standard")
         self.mode_action.setCheckable(True)
-        self.mode_action.setStyleSheet("""
-            QPushButton { background-color: #dcdcdc; color: #000000; font-weight: 500; border: none; border-radius: 4px; padding: 3px 12px; margin: 0px; }
-            QPushButton:checked { background-color: #b0bec5; }
-        """)
         self.mode_action.clicked.connect(self.toggle_layout_mode)
         self.toolbar.addWidget(self.mode_action)
+        
+        self.toolbar.addSeparator()
+        
+        self.pdf_only_action = QPushButton("PDF only")
+        self.pdf_only_action.setToolTip("Collapse both thumbnail and AI chat panels")
+        self.pdf_only_action.clicked.connect(self.toggle_pdf_only)
+        self.toolbar.addWidget(self.pdf_only_action)
         
         spacer = QWidget()
         spacer.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Preferred)
         self.toolbar.addWidget(spacer)
         
-        config_action = QPushButton("AI configuration")
-        config_action.setStyleSheet("background-color: #dcdcdc; color: #000000; font-weight: 500; border: none; border-radius: 4px; padding: 3px 12px; margin: 0px;")
+        config_action = QPushButton("Settings")
         config_action.clicked.connect(self.open_config)
         self.toolbar.addWidget(config_action)
         
         # Connect signals
+        self.splitter.panel_states_changed.connect(self.update_pdf_only_button_state)
         self.chat_panel.message_sent.connect(self.handle_chat_message)
         self.chat_panel.open_prompts_dialog.connect(self.open_prompts_dialog)
         self.chat_panel.save_requested.connect(self.save_markdown_response)
@@ -259,6 +416,49 @@ class MainWindow(QMainWindow):
         self.worker = None
         self.indexer = None
         self.zombie_threads = []
+        
+        # Initial Theme Apply
+        self.update_ui_theme()
+        self.update_pdf_only_button_state()
+        
+        from PySide6.QtWidgets import QApplication
+        app = QApplication.instance()
+        if app and hasattr(app, "styleHints"):
+            try:
+                app.styleHints().colorSchemeChanged.connect(self._on_system_theme_changed)
+            except Exception:
+                pass
+        
+    def _on_system_theme_changed(self):
+        if self.config.color_mode.lower().startswith("system") or self.config.color_mode.lower() == "auto":
+            self.update_ui_theme()
+
+    def update_ui_theme(self, preview_style: str = None, preview_mode: str = None):
+        from ui.theme_manager import ThemeManager
+        app_style = preview_style if preview_style is not None else self.config.app_style
+        color_mode = preview_mode if preview_mode is not None else self.config.color_mode
+        palette = ThemeManager.get_palette(app_style, color_mode)
+        
+        from PySide6.QtWidgets import QApplication
+        ThemeManager.apply_theme(QApplication.instance(), app_style, color_mode)
+        
+        self.pdf_view.update_theme(app_style, color_mode)
+        self.chat_panel.update_theme(app_style, color_mode, self.config.ai_font_family, self.config.ai_font_size)
+        
+        self.log_list.setStyleSheet(f"""
+            QListWidget {{
+                background-color: {palette['log_bg']};
+                color: {palette['text_secondary']};
+                font-size: 10pt;
+                border: none;
+                border-top: 1px solid {palette['border']};
+            }}
+            QListWidget::item {{
+                padding: 0px;
+                margin: 0px;
+                min-height: 16px;
+            }}
+        """)
         
     def toggle_page_inclusion(self, page_index: int):
         is_ai = self.pdf_doc.is_ai_generated(page_index)
@@ -284,20 +484,28 @@ class MainWindow(QMainWindow):
         
     def open_config(self):
         old_model = self.config.model_name
-        dialog = ConfigDialog(self, self.ai_assistant.api_key)
+        old_api_key = self.ai_assistant.api_key or ""
+        old_style = self.config.app_style
+        old_mode = self.config.color_mode
+        
+        dialog = ConfigDialog(self, old_api_key)
+        dialog.theme_preview_requested.connect(lambda s, m: self.update_ui_theme(preview_style=s, preview_mode=m))
+        
         if dialog.exec():
             new_model = self.config.model_name
-            self.ai_assistant.set_api_key(dialog.api_key)
+            new_api_key = dialog.api_key or ""
+            
+            self.ai_assistant.set_api_key(new_api_key)
             self.ai_assistant.set_model_name(new_model)
             self.ai_font_family = self.config.ai_font_family
             self.ai_font_size = self.config.ai_font_size
             
-            self.chat_panel.update_font(self.ai_font_family, self.ai_font_size)
+            self.update_ui_theme()
             
             # Save API key to Keychain
             try:
-                if dialog.api_key:
-                    keyring.set_password("AIPDFViewer", "api_key", dialog.api_key)
+                if new_api_key:
+                    keyring.set_password("AIPDFViewer", "api_key", new_api_key)
                 else:
                     try:
                         keyring.delete_password("AIPDFViewer", "api_key")
@@ -306,17 +514,28 @@ class MainWindow(QMainWindow):
             except Exception as e:
                 print(f"Failed to save to keychain: {e}")
             
-            QMessageBox.information(self, "Config Updated", f"Using model: {new_model}")
+            model_changed = (old_model != new_model and bool(new_model))
+            key_changed = (old_api_key != new_api_key)
             
-            if old_model != new_model and self.pdf_doc.doc:
-                self.chat_panel.clear_chat()
-                self.chat_panel.set_index_status("unloaded")
-                self.ai_assistant.clear_index()
-                self.chat_panel.show_index_button()
-                self.add_log(f"Model changed to {new_model}. Please re-index the document.")
-            elif self.pdf_doc.doc and not self.ai_assistant.uploaded_file:
+            if model_changed or key_changed:
+                if self.pdf_doc.doc:
+                    self.chat_panel.clear_chat()
+                    self.chat_panel.set_index_status("unloaded")
+                    self.ai_assistant.clear_index()
+                    self.chat_panel.show_index_button()
+                    
+                    if model_changed:
+                        self.add_log(f"Model changed to {new_model}. Please re-index the document.")
+                        QMessageBox.information(self, "Model Changed", f"AI model changed to {new_model}.\nPlease re-index the document to continue.")
+                    else:
+                        self.add_log("API Key updated. Please re-index the document.")
+                        QMessageBox.information(self, "API Key Updated", "API key updated successfully.\nPlease re-index the document to continue.")
+            elif self.pdf_doc.doc and not self.ai_assistant.uploaded_file and new_api_key:
                 # If we just added an API key and couldn't index before
                 self.index_current_document()
+        else:
+            # Revert theme preview back to saved configuration
+            self.update_ui_theme(preview_style=old_style, preview_mode=old_mode)
 
     def open_prompts_dialog(self):
         dialog = PromptsDialog(self, self.ai_assistant, self.prompts_manager)
@@ -326,13 +545,88 @@ class MainWindow(QMainWindow):
 
     def toggle_layout_mode(self, checked):
         if checked:
+            self._saved_splitter_sizes = self.splitter.sizes()
             self.mode_action.setText("AI Chat View")
             self.thumbnail_panel.setVisible(False)
             self.pdf_container.setVisible(False)
+            self.pdf_only_action.setEnabled(False)
         else:
             self.mode_action.setText("Standard View")
             self.thumbnail_panel.setVisible(True)
             self.pdf_container.setVisible(True)
+            self.pdf_only_action.setEnabled(True)
+            
+            if hasattr(self, "_saved_splitter_sizes") and self._saved_splitter_sizes:
+                sizes = self._saved_splitter_sizes
+                self.splitter.setStretchFactor(0, 0 if sizes[0] <= 20 else 1)
+                self.splitter.setStretchFactor(1, 1 if (sizes[0] <= 20 and sizes[2] <= 20) else 4)
+                self.splitter.setStretchFactor(2, 0 if sizes[2] <= 20 else 2)
+                self.splitter.setSizes(sizes)
+                
+                h1 = self.splitter.handle(1)
+                if isinstance(h1, MainSplitterHandle):
+                    h1.update_state(collapsed=(sizes[0] <= 20))
+                h2 = self.splitter.handle(2)
+                if isinstance(h2, MainSplitterHandle):
+                    h2.update_state(collapsed=(sizes[2] <= 20))
+                    
+            self.update_pdf_only_button_state()
+
+    def update_pdf_only_button_state(self):
+        sizes = self.splitter.sizes()
+        if len(sizes) >= 3:
+            both_collapsed = (sizes[0] <= 20 and sizes[2] <= 20)
+            if both_collapsed:
+                self.pdf_only_action.setText("PDF n co")
+                self.pdf_only_action.setToolTip("Expand thumbnail and AI chat panels")
+            else:
+                self.pdf_only_action.setText("PDF only")
+                self.pdf_only_action.setToolTip("Collapse both thumbnail and AI chat panels")
+
+    def toggle_pdf_only(self):
+        sizes = self.splitter.sizes()
+        if len(sizes) < 3:
+            return
+        
+        h1 = self.splitter.handle(1)
+        h2 = self.splitter.handle(2)
+        
+        both_collapsed = (sizes[0] <= 20 and sizes[2] <= 20)
+        total_w = sum(sizes)
+        
+        if both_collapsed:
+            # Expand both panels
+            w1 = getattr(h1, "last_width", 171)
+            if w1 < 50:
+                w1 = 171
+            w2 = getattr(h2, "last_width", 343)
+            if w2 < 50:
+                w2 = 343
+            w_mid = max(100, total_w - w1 - w2)
+            self.splitter.setStretchFactor(0, 1)
+            self.splitter.setStretchFactor(1, 4)
+            self.splitter.setStretchFactor(2, 2)
+            self.splitter.setSizes([w1, w_mid, w2])
+            if isinstance(h1, MainSplitterHandle):
+                h1.update_state(collapsed=False)
+            if isinstance(h2, MainSplitterHandle):
+                h2.update_state(collapsed=False)
+        else:
+            # Collapse both panels
+            if sizes[0] > 20 and isinstance(h1, MainSplitterHandle):
+                h1.last_width = sizes[0]
+            if sizes[2] > 20 and isinstance(h2, MainSplitterHandle):
+                h2.last_width = sizes[2]
+            self.splitter.setStretchFactor(0, 0)
+            self.splitter.setStretchFactor(1, 1)
+            self.splitter.setStretchFactor(2, 0)
+            self.splitter.setSizes([0, total_w, 0])
+            if isinstance(h1, MainSplitterHandle):
+                h1.update_state(collapsed=True)
+            if isinstance(h2, MainSplitterHandle):
+                h2.update_state(collapsed=True)
+                
+        self.update_pdf_only_button_state()
 
     def open_pdf(self):
         file_path, _ = QFileDialog.getOpenFileName(self, "Open PDF", "", "PDF Files (*.pdf)")
@@ -423,6 +717,10 @@ class MainWindow(QMainWindow):
         if not self.ai_assistant.api_key:
             self.chat_panel.add_system_message("Please configure Google API Key to enable AI features.")
             return
+            
+        if self.indexer and self.indexer.isRunning():
+            self.zombie_threads.append(self.indexer)
+            self.indexer = None
             
         self.chat_panel.set_index_status("processing")
         file_path = self.pdf_doc.file_path

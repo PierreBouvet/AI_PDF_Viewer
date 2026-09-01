@@ -85,10 +85,8 @@ class AIAssistant:
                 "Return exactly the top 10 as a JSON list of strings (e.g. ['gemini-3.5-flash', ...]). Do not return markdown, just the JSON array."
             )
             
-            response = self.client.models.generate_content(
-                model=pro_model,
-                contents=prompt
-            )
+            chat = self.client.chats.create(model=pro_model)
+            response = chat.send_message(prompt)
             
             # Extract JSON list
             text = response.text.replace("```json", "").replace("```", "").strip()
@@ -228,16 +226,11 @@ class AIAssistant:
         if not self.api_key or not self.client:
             raise ValueError("Please configure your Google API Key in the settings.")
 
+        chat = self.client.chats.create(model=self.model_name)
         if self.uploaded_file:
-            response = self.client.models.generate_content(
-                model=self.model_name,
-                contents=[self.uploaded_file, question]
-            )
+            response = chat.send_message([self.uploaded_file, question])
         else:
-            response = self.client.models.generate_content(
-                model=self.model_name,
-                contents=question
-            )
+            response = chat.send_message(question)
             
         return response.text
 
