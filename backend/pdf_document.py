@@ -194,3 +194,211 @@ class PDFDocument:
                     os.remove(temp_pdf_path)
                 except Exception:
                     pass
+
+    def add_highlight_annotation(self, page_number: int, rects: List[Tuple[float, float, float, float]]) -> bool:
+        """Add standard PDF highlight annotations over a list of rectangles."""
+        if not self.doc or page_number < 0 or page_number >= len(self.doc) or not rects:
+            return False
+        try:
+            page = self.doc[page_number]
+            for r in rects:
+                annot = page.add_highlight_annot(fitz.Rect(*r))
+                annot.set_colors(stroke=(1.0, 0.9, 0.0))
+                annot.update()
+            return True
+        except Exception as e:
+            print(f"Error adding highlight annot: {e}")
+            return False
+
+    def add_text_annotation(self, page_number: int, point: Tuple[float, float], text: str) -> bool:
+        """Add standard PDF sticky Note annotation (Preview & Acrobat compatible)."""
+        if not self.doc or page_number < 0 or page_number >= len(self.doc):
+            return False
+        try:
+            page = self.doc[page_number]
+            p = fitz.Point(point[0], point[1])
+            annot = page.add_text_annot(p, text, icon="Comment")
+            annot.set_colors(stroke=(1.0, 0.85, 0.0))
+            annot.update()
+            return True
+        except Exception as e:
+            print(f"Error adding text annot: {e}")
+            return False
+
+    def add_ink_annotation(self, page_number: int, strokes: List[List[Tuple[float, float]]], color=(1.0, 0.9, 0.0), width=8, opacity=0.5) -> bool:
+        """Add freehand marker stroke ink annotation."""
+        if not self.doc or page_number < 0 or page_number >= len(self.doc) or not strokes:
+            return False
+        try:
+            page = self.doc[page_number]
+            annot = page.add_ink_annot(strokes)
+            annot.set_colors(stroke=color)
+            annot.set_border(width=width)
+            annot.set_opacity(opacity)
+            annot.update()
+            return True
+        except Exception as e:
+            print(f"Error adding ink annot: {e}")
+            return False
+
+    def add_freetext_annotation(self, page_number: int, rect: Tuple[float, float, float, float], text: str, font_size=12, text_color=(0, 0, 0), fill_color=None) -> bool:
+        """Add standard PDF FreeText annotation (Text box on the PDF)."""
+        if not self.doc or page_number < 0 or page_number >= len(self.doc):
+            return False
+        try:
+            page = self.doc[page_number]
+            r = fitz.Rect(*rect)
+            annot = page.add_freetext_annot(r, text, fontsize=font_size, text_color=text_color, fill_color=fill_color)
+            annot.update()
+            return True
+        except Exception as e:
+            print(f"Error adding freetext annot: {e}")
+            return False
+
+    def get_text_range_rects(self, page_number: int, p0: Tuple[float, float], p1: Tuple[float, float]) -> Tuple[str, List[Tuple[float, float, float, float]]]:
+        """Get text and merged line bounding boxes between two arbitrary points in reading order."""
+        if not self.doc or page_number < 0 or page_number >= len(self.doc):
+            return "", []
+        try:
+            page = self.doc[page_number]
+            words = page.get_text("words")
+            if not words:
+                return "", []
+                
+            def find_closest_word_index(words_list, pt):
+                x, y = pt
+                for idx, w in enumerate(words_list):
+                    if w[0] <= x <= w[2] and w[1] <= y <= w[3]:
+                        return idx
+                best_idx = 0
+                best_dist = float("inf")
+                for idx, w in enumerate(words_list):
+                    cx, cy = (w[0] + w[2]) / 2.0, (w[1] + w[3]) / 2.0
+                    dist = (cx - x)**2 + 4.0 * (cy - y)**2
+                    if dist < best_dist:
+                        best_dist = dist
+                        best_idx = idx
+                return best_idx
+                
+            idx0 = find_closest_word_index(words, p0)
+            idx1 = find_closest_word_index(words, p1)
+            i_min, i_max = min(idx0, idx1), max(idx0, idx1)
+            selected_words = words[i_min:i_max + 1]
+            
+            lines = {}
+            for w in selected_words:
+                key = (w[5], w[6])
+                if key not in lines:
+                    lines[key] = [w[0], w[1], w[2], w[3]]
+                else:
+                    lines[key][0] = min(lines[key][0], w[0])
+                    lines[key][1] = min(lines[key][1], w[1])
+                    lines[key][2] = max(lines[key][2], w[2])
+                    lines[key][3] = max(lines[key][3], w[3])
+            return " ".join(w[4] for w in selected_words), [tuple(r) for r in lines.values()]
+        except Exception as e:
+            print(f"Error extracting text range: {e}")
+            return "", []
+
+    def get_annotation_at_point(self, page_number: int, x: float, y: float, tolerance: float = 6.0):
+        """Find topmost annotation on page_number containing point (x, y)."""
+        if not self.doc or page_number < 0 or page_number >= len(self.doc):
+            return None
+        try:
+            page = self.doc[page_number]
+            point = fitz.Point(x, y)
+            annots = list(page.annots())
+            for annot in reversed(annots):
+                r = fitz.Rect(annot.rect)
+                r_expanded = fitz.Rect(r.x0 - tolerance, r.y0 - tolerance, r.x1 + tolerance, r.y1 + tolerance)
+                if r_expanded.contains(point):
+                    annot.parent_page = page
+                    return annot
+            return None
+        except Exception as e:
+            print(f"Error finding annot at point: {e}")
+            return None
+
+    def delete_annotation(self, page_number: int, annot) -> bool:
+        """Delete an annotation from page and save document."""
+        if not self.doc or page_number < 0 or page_number >= len(self.doc) or not annot:
+            return False
+        try:
+            page = getattr(annot, "parent_page", None) or self.doc[page_number]
+            page.delete_annot(annot)
+            self.save_document()
+            return True
+        except Exception as e:
+            print(f"Error deleting annot: {e}")
+            return False
+
+    def update_annotation_text(self, page_number: int, annot, new_text: str) -> bool:
+        """Update annotation text content (for notes and text boxes)."""
+        if not self.doc or page_number < 0 or page_number >= len(self.doc) or not annot:
+            return False
+        try:
+            page = getattr(annot, "parent_page", None) or self.doc[page_number]
+            annot_type = annot.type[1]
+            if annot_type == "FreeText":
+                r = annot.rect
+                page.delete_annot(annot)
+                self.add_freetext_annotation(page_number, (r.x0, r.y0, r.x1, r.y1), new_text)
+            else:
+                annot.set_info(content=new_text)
+                annot.update()
+            self.save_document()
+            return True
+        except Exception as e:
+            print(f"Error updating annot text: {e}")
+            return False
+
+    def move_annotation(self, page_number: int, annot, dx: float, dy: float) -> bool:
+        """Move annotation by offset (dx, dy)."""
+        if not self.doc or page_number < 0 or page_number >= len(self.doc) or not annot:
+            return False
+        try:
+            page = getattr(annot, "parent_page", None) or self.doc[page_number]
+            annot_type = annot.type[1]
+            r = annot.rect
+            new_r = fitz.Rect(r.x0 + dx, r.y0 + dy, r.x1 + dx, r.y1 + dy)
+            if annot_type == "FreeText":
+                content = annot.info.get("content", "") or annot.get_text()
+                page.delete_annot(annot)
+                self.add_freetext_annotation(page_number, (new_r.x0, new_r.y0, new_r.x1, new_r.y1), content)
+            else:
+                annot.set_rect(new_r)
+                annot.update()
+            self.save_document()
+            return True
+        except Exception as e:
+            print(f"Error moving annot: {e}")
+            return False
+
+    def save_document(self, output_path: str = "") -> Tuple[bool, str]:
+        """Persist document and all annotations to PDF file."""
+        if not self.doc:
+            return False, "No document loaded"
+        save_path = output_path or self.file_path
+        if not save_path:
+            return False, "No output path specified"
+        
+        import os
+        import shutil
+        import tempfile
+        
+        is_inplace = (os.path.abspath(save_path) == os.path.abspath(self.file_path)) if self.file_path else False
+        try:
+            if is_inplace:
+                fd, temp_file = tempfile.mkstemp(suffix=".pdf")
+                os.close(fd)
+                self.doc.save(temp_file, incremental=False, deflate=True)
+                self.close()
+                shutil.move(temp_file, save_path)
+                self.load(save_path)
+            else:
+                self.doc.save(save_path, incremental=False, deflate=True)
+                self.load(save_path)
+            return True, ""
+        except Exception as e:
+            return False, str(e)
+
