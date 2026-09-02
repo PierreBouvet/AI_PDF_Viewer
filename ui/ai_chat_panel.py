@@ -3,6 +3,8 @@ from PySide6.QtWebEngineWidgets import QWebEngineView
 from PySide6.QtWebEngineCore import QWebEnginePage
 from PySide6.QtCore import Signal, Qt
 import json
+from ui.theme_manager import ThemeManager
+from ui.asset_loader import get_assets_base_url
 
 class ChatWebPage(QWebEnginePage):
     double_clicked_idx = Signal(int)
@@ -32,8 +34,6 @@ class ChatWebPage(QWebEnginePage):
                 pass
             return
         super().javaScriptConsoleMessage(level, message, lineNumber, sourceId)
-
-from ui.theme_manager import ThemeManager
 
 class AIChatPanel(QWidget):
     message_sent = Signal(str, bool, str)
@@ -68,7 +68,7 @@ class AIChatPanel(QWidget):
         self.web_page.append_pdf_idx.connect(self.request_append_message)
         self.web_page.edit_msg_idx.connect(self.request_edit_message)
         self.web_view.setPage(self.web_page)
-        self.web_view.setHtml(self._get_html_template())
+        self.web_view.setHtml(self._get_html_template(), get_assets_base_url())
         layout.addWidget(self.web_view)
         
         # Fallback UI
@@ -256,7 +256,9 @@ class AIChatPanel(QWidget):
         <html>
         <head>
             <meta charset="utf-8">
-            <script src="https://cdn.jsdelivr.net/npm/marked/marked.min.js"></script>
+            <meta http-equiv="Content-Security-Policy" content="default-src 'self' 'unsafe-inline' 'unsafe-eval' data: blob:;">
+            <script src="marked.min.js"></script>
+            <script src="purify.min.js"></script>
             <script>
             window.MathJax = {
                 tex: {
@@ -270,7 +272,7 @@ class AIChatPanel(QWidget):
                 }
             };
             </script>
-            <script src="https://cdn.jsdelivr.net/npm/mathjax@3/es5/tex-mml-chtml.js"></script>
+            <script src="tex-mml-chtml.js"></script>
             <style id="custom-theme-style">
                 __CHAT_CSS__
                 .loading-indicator {
@@ -289,6 +291,22 @@ class AIChatPanel(QWidget):
                 }
             </style>
             <script>
+                function renderMarkdownSafe(text) {
+                    if (window.marked && window.DOMPurify) {
+                        return DOMPurify.sanitize(marked.parse(text));
+                    } else if (window.marked) {
+                        return marked.parse(text);
+                    }
+                    return text;
+                }
+
+                function sanitizeText(text) {
+                    if (window.DOMPurify) {
+                        return DOMPurify.sanitize(text);
+                    }
+                    return text;
+                }
+
                 function showLoading() {
                     hideLoading();
                     const container = document.getElementById('chat-container');
@@ -346,16 +364,16 @@ class AIChatPanel(QWidget):
                     }
                     
                     if (sender === 'user') {
-                        msgDiv.innerHTML = '<b>You:</b> ' + text;
+                        msgDiv.innerHTML = '<b>You:</b> ' + sanitizeText(text);
                     } else if (sender === 'system') {
-                        msgDiv.innerHTML = text;
+                        msgDiv.innerHTML = sanitizeText(text);
                     } else {
                         // AI Message
                         let html = '<b>AI:</b><br>';
                         if (isMarkdown) {
-                            html += marked.parse(text);
+                            html += renderMarkdownSafe(text);
                         } else {
-                            html += text;
+                            html += sanitizeText(text);
                         }
                         if (idx !== undefined && idx !== null) {
                             html += `<br><button onclick="console.log('EDIT_MSG_IDX:' + ${idx})" style="margin-top:8px; margin-right:8px; padding:4px 8px; font-size:9pt; cursor:pointer; background-color:#e1e1e1; border:1px solid #ccc; border-radius:4px;">Edit Response</button>`;
@@ -386,7 +404,7 @@ class AIChatPanel(QWidget):
                     
                     for (let i = 0; i < parts.length; i++) {
                         let title = i < titles.length ? titles[i] : 'Section ' + (i+1);
-                        let parsedPart = marked.parse(parts[i]);
+                        let parsedPart = renderMarkdownSafe(parts[i]);
                         html += `<div class='explain-section'><b>${title}</b><br>${parsedPart}</div>`;
                     }
                     if (idx !== undefined && idx !== null) {
@@ -412,7 +430,7 @@ class AIChatPanel(QWidget):
                         msgDiv.title = "Double-click to open in new window";
                     }
                     
-                    let parsedText = marked.parse(text);
+                    let parsedText = renderMarkdownSafe(text);
                     let html = `<b>AI Discuss:</b><br><div class='discuss-section'>${parsedText}</div>`;
                     if (idx !== undefined && idx !== null) {
                         html += `<br><button onclick="console.log('EDIT_MSG_IDX:' + ${idx})" style="margin-top:8px; margin-right:8px; padding:4px 8px; font-size:9pt; cursor:pointer; background-color:#e1e1e1; border:1px solid #ccc; border-radius:4px;">Edit Response</button>`;
@@ -438,7 +456,7 @@ class AIChatPanel(QWidget):
                         msgDiv.title = "Double-click to open in new window";
                     }
                     
-                    let parsedText = marked.parse(text);
+                    let parsedText = renderMarkdownSafe(text);
                     let html = `<b>AI Summary:</b><br><div class='summary-section'>${parsedText}</div>`;
                     if (idx !== undefined && idx !== null) {
                         html += `<br><button onclick="console.log('EDIT_MSG_IDX:' + ${idx})" style="margin-top:8px; margin-right:8px; padding:4px 8px; font-size:9pt; cursor:pointer; background-color:#e1e1e1; border:1px solid #ccc; border-radius:4px;">Edit Response</button>`;
@@ -455,7 +473,7 @@ class AIChatPanel(QWidget):
                     if (!msgDiv) return;
                     
                     let html = '<b>AI' + (msgType === "chat" ? "" : " " + msgType.charAt(0).toUpperCase() + msgType.slice(1)) + ':</b><br>';
-                    let parsedText = marked.parse(newText);
+                    let parsedText = renderMarkdownSafe(newText);
                     
                     if (msgType === "discuss") {
                         html += `<div class='discuss-section'>${parsedText}</div>`;
@@ -560,5 +578,5 @@ class AIChatPanel(QWidget):
             
     def clear_chat(self):
         self.raw_messages = []
-        self.web_view.setHtml(self._get_html_template())
+        self.web_view.setHtml(self._get_html_template(), get_assets_base_url())
         self.index_btn.setVisible(False)

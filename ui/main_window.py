@@ -15,6 +15,7 @@ from backend.ai_assistant import AIAssistant
 from backend.prompts_manager import PromptsManager
 from ui.prompts_dialog import PromptsDialog
 from backend.config_manager import ConfigManager
+from backend.logger import logger
 
 class MainSplitterHandle(QSplitterHandle):
     def __init__(self, orientation, parent):
@@ -178,11 +179,7 @@ class WorkerThread(QThread):
         self.display_title = display_title
         
     def run(self):
-        if os.environ.get("DEBUG_AI") == "1":
-            print(f"\n--- SENT TO AI ({self.action_type}) ---")
-            print(f"USE DIRECT: {self.use_direct}")
-            print(self.question)
-            print("------------------------\n")
+        logger.debug(f"--- SENT TO AI ({self.action_type}) --- (Direct: {self.use_direct})\n{self.question}")
             
         try:
             if self.use_direct:
@@ -190,31 +187,34 @@ class WorkerThread(QThread):
             else:
                 answer = self.ai_assistant.ask(self.question)
                 
-            if os.environ.get("DEBUG_AI") == "1":
-                print(f"\n--- AI RESPONSE ({self.action_type}) ---")
-                print(answer)
-                print("--------------------------\n")
+            logger.debug(f"--- AI RESPONSE ({self.action_type}) ---\n{answer}")
                 
             self.result_ready.emit(answer, self.action_type, self.original_prompt, self.display_title)
         except Exception as e:
+            logger.error(f"AI Worker error: {e}")
             self.error.emit(str(e))
+
+from ui.asset_loader import get_assets_base_url
 
 class PDFGenerator(QObject):
     finished = Signal(bool)
     
     def __init__(self, html: str, output_path: str):
         super().__init__()
-        self.page = QWebEnginePage()
+        self.page = QWebEnginePage(self)
         self.output_path = output_path
+        self._retries = 0
+        self._max_retries = 50 # 5 seconds max wait for MathJax
         self.page.loadFinished.connect(self.on_load_finished)
         self.page.pdfPrintingFinished.connect(self.on_pdf_printed)
-        self.page.setHtml(html)
+        self.page.setHtml(html, get_assets_base_url())
         
     def check_status(self):
+        self._retries += 1
         self.page.runJavaScript("window.status", 0, self.on_status)
         
     def on_status(self, res):
-        if res == "MATHJAX_DONE":
+        if res == "MATHJAX_DONE" or self._retries >= self._max_retries:
             from PySide6.QtGui import QPageLayout, QPageSize
             from PySide6.QtCore import QMarginsF
             layout = QPageLayout(QPageSize(QPageSize.A4), QPageLayout.Portrait, QMarginsF(10, 10, 10, 10), QPageLayout.Millimeter)
@@ -250,6 +250,7 @@ class IndexingThread(QThread):
             self.error.emit(str(e))
 
 class StartupTaskThread(QThread):
+    models_ranked = Signal(list)
     error = Signal(str)
     
     def __init__(self, ai_assistant):
@@ -258,7 +259,9 @@ class StartupTaskThread(QThread):
         
     def run(self):
         try:
-            self.ai_assistant.rank_available_models()
+            ranked = self.ai_assistant.rank_available_models()
+            if ranked:
+                self.models_ranked.emit(ranked)
         except Exception as e:
             self.error.emit(f"Failed to rank models at startup: {e}")
 
@@ -274,18 +277,15 @@ class MainWindow(QMainWindow):
         self.ai_font_family = self.config.ai_font_family
         self.ai_font_size = self.config.ai_font_size
         
-        try:
-            saved_api_key = keyring.get_password("AIPDFViewer", "api_key") or ""
-        except Exception:
-            saved_api_key = ""
-        
         # Initialize Backend
         self.pdf_doc = PDFDocument()
-        self.ai_assistant = AIAssistant(api_key=saved_api_key, model_name=saved_model_name)
+        self.ai_assistant = AIAssistant(model_name=saved_model_name)
         self.prompts_manager = PromptsManager()
         
         self.startup_thread = StartupTaskThread(self.ai_assistant)
+        self.startup_thread.models_ranked.connect(self.on_models_ranked)
         self.startup_thread.error.connect(self.on_worker_error)
+        self.startup_thread.finished.connect(self.startup_thread.deleteLater)
         self.startup_thread.start()
         
         # Central Splitter
@@ -378,6 +378,15 @@ class MainWindow(QMainWindow):
         self.open_action.clicked.connect(self.open_pdf)
         self.toolbar.addWidget(self.open_action)
         
+        self.save_btn = QPushButton("Save")
+        self.save_btn.setToolTip("Save PDF annotations (Cmd+S / Ctrl+S)")
+        self.save_btn.clicked.connect(self.save_current_document)
+        self.toolbar.addWidget(self.save_btn)
+        
+        from PySide6.QtGui import QKeySequence, QShortcut
+        self.save_shortcut = QShortcut(QKeySequence.StandardKey.Save, self)
+        self.save_shortcut.activated.connect(self.save_current_document)
+        
         self.toolbar.addSeparator()
         
         self.mode_action = QPushButton("Standard")
@@ -409,6 +418,7 @@ class MainWindow(QMainWindow):
         self.chat_panel.index_requested.connect(self.index_current_document)
         self.thumbnail_panel.page_selected.connect(self.go_to_page)
         self.thumbnail_panel.toggle_inclusion_requested.connect(self.toggle_page_inclusion)
+        self.thumbnail_panel.delete_page_requested.connect(self.delete_page)
         self.pdf_view.page_changed.connect(self.thumbnail_panel.set_current_page)
         self.pdf_view.text_action_requested.connect(self.handle_text_action)
         self.chat_panel.fallback_model_selected.connect(self.on_fallback_selected)
@@ -484,7 +494,10 @@ class MainWindow(QMainWindow):
         
     def open_config(self):
         old_model = self.config.model_name
-        old_api_key = self.ai_assistant.api_key or ""
+        try:
+            old_api_key = keyring.get_password("AIPDFViewer", "api_key") or ""
+        except Exception:
+            old_api_key = ""
         old_style = self.config.app_style
         old_mode = self.config.color_mode
         
@@ -495,7 +508,6 @@ class MainWindow(QMainWindow):
             new_model = self.config.model_name
             new_api_key = dialog.api_key or ""
             
-            self.ai_assistant.set_api_key(new_api_key)
             self.ai_assistant.set_model_name(new_model)
             self.ai_font_family = self.config.ai_font_family
             self.ai_font_size = self.config.ai_font_size
@@ -512,7 +524,7 @@ class MainWindow(QMainWindow):
                     except Exception:
                         pass
             except Exception as e:
-                print(f"Failed to save to keychain: {e}")
+                logger.error(f"Failed to save to keychain: {e}")
             
             model_changed = (old_model != new_model and bool(new_model))
             key_changed = (old_api_key != new_api_key)
@@ -629,9 +641,51 @@ class MainWindow(QMainWindow):
         self.update_pdf_only_button_state()
 
     def open_pdf(self):
+        if not self.maybe_save_prompt():
+            return
         file_path, _ = QFileDialog.getOpenFileName(self, "Open PDF", "", "PDF Files (*.pdf)")
         if file_path:
             self.load_pdf(file_path)
+
+    def save_current_document(self):
+        """Save the currently open document."""
+        if not self.pdf_doc or not self.pdf_doc.doc:
+            return
+        success, err = self.pdf_doc.save_document()
+        if success:
+            self.statusBar().showMessage("Document saved successfully.", 3000)
+            self.add_log("Document saved")
+        else:
+            QMessageBox.critical(self, "Error", f"Failed to save document: {err}")
+
+    def maybe_save_prompt(self) -> bool:
+        """Prompts user if document has unsaved changes. Returns True if okay to proceed, False if cancelled."""
+        if not self.pdf_doc or not self.pdf_doc.doc or not getattr(self.pdf_doc, "is_dirty", False):
+            return True
+            
+        filename = os.path.basename(self.pdf_doc.file_path) if self.pdf_doc.file_path else "Document"
+        reply = QMessageBox.question(
+            self, "Save Document",
+            f"Do you want to save the changes made to '{filename}'?",
+            QMessageBox.StandardButton.Save | QMessageBox.StandardButton.Discard | QMessageBox.StandardButton.Cancel,
+            QMessageBox.StandardButton.Save
+        )
+        if reply == QMessageBox.StandardButton.Save:
+            success, err = self.pdf_doc.save_document()
+            if not success:
+                QMessageBox.critical(self, "Error", f"Failed to save document: {err}")
+                return False
+            return True
+        elif reply == QMessageBox.StandardButton.Discard:
+            return True
+        else:
+            return False
+
+    def closeEvent(self, event):
+        if self.maybe_save_prompt():
+            event.accept()
+        else:
+            event.ignore()
 
     def load_pdf(self, file_path):
         # Safely handle any running threads so they don't get destroyed mid-execution
@@ -689,6 +743,8 @@ class MainWindow(QMainWindow):
         if urls and urls[0].isLocalFile():
             file_path = urls[0].toLocalFile()
             if file_path.lower().endswith(".pdf"):
+                if not self.maybe_save_prompt():
+                    return
                 if self.pdf_doc.doc:
                     reply = QMessageBox.question(
                         self, "Confirm Overwrite", 
@@ -713,8 +769,32 @@ class MainWindow(QMainWindow):
         self.pdf_view.set_current_page(page_index)
         self.thumbnail_panel.set_current_page(page_index)
 
+    def delete_page(self, page_index: int):
+        if not self.pdf_doc.doc:
+            return
+            
+        reply = QMessageBox.question(
+            self, "Confirm Deletion",
+            f"Are you sure you want to delete Page {page_index + 1}?",
+            QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
+            QMessageBox.StandardButton.No
+        )
+        
+        if reply == QMessageBox.StandardButton.Yes:
+            if self.pdf_doc.delete_page(page_index):
+                self.pdf_view.set_document(self.pdf_doc)
+                self.thumbnail_panel.set_document(self.pdf_doc, self.excluded_pages, self.included_pages)
+                
+                new_page = min(page_index, self.pdf_doc.page_count - 1)
+                if new_page >= 0:
+                    self.pdf_view.set_current_page(new_page)
+                    self.thumbnail_panel.set_current_page(new_page)
+                    
+                self.update_window_title()
+
     def index_current_document(self):
-        if not self.ai_assistant.api_key:
+        api_key = keyring.get_password("AIPDFViewer", "api_key")
+        if not api_key:
             self.chat_panel.add_system_message("Please configure Google API Key to enable AI features.")
             return
             
@@ -753,6 +833,14 @@ class MainWindow(QMainWindow):
             self.statusBar().showMessage(f"Indexing Error: {error_msg}", 10000)
             self.chat_panel.set_index_status("unloaded")
         
+    def on_models_ranked(self, ranked_models: list):
+        if ranked_models:
+            # If no model has been explicitly chosen by user, pick the top-ranked model
+            if not self.config.model_name:
+                best_model = ranked_models[0]["name"]
+                self.ai_assistant.set_model_name(best_model)
+                self.config.model_name = best_model
+
     def handle_text_action(self, action_type: str, text: str):
         # Ensure AI panel is open
         self.chat_panel.setVisible(True)
@@ -782,6 +870,7 @@ class MainWindow(QMainWindow):
         self.worker = WorkerThread(self.ai_assistant, prompt, action_type, original_prompt=prompt, display_title=display_title)
         self.worker.result_ready.connect(self.on_ai_response)
         self.worker.error.connect(self.on_worker_error)
+        self.worker.finished.connect(self.worker.deleteLater)
         self.worker.start()
         
     def handle_chat_message(self, text: str, is_custom: bool = False, display_title: str = ""):
@@ -793,6 +882,7 @@ class MainWindow(QMainWindow):
             
         self.worker.result_ready.connect(self.on_ai_response)
         self.worker.error.connect(self.on_worker_error)
+        self.worker.finished.connect(self.worker.deleteLater)
         self.worker.start()
         
     def on_worker_error(self, error_msg: str):
@@ -911,7 +1001,10 @@ class MainWindow(QMainWindow):
             <!DOCTYPE html>
             <html>
             <head>
-            <script src="https://cdn.jsdelivr.net/npm/marked/marked.min.js"></script>
+            <meta charset="utf-8">
+            <meta http-equiv="Content-Security-Policy" content="default-src 'self' 'unsafe-inline' 'unsafe-eval' data: blob:;">
+            <script src="marked.min.js"></script>
+            <script src="purify.min.js"></script>
             <script>
             window.MathJax = {{
                 tex: {{ inlineMath: [['$', '$'], ['\\\\\\\\(', '\\\\\\\\)']], displayMath: [['$$', '$$'], ['\\\\\\\\[', '\\\\\\\\]']], processEscapes: true }},
@@ -924,7 +1017,7 @@ class MainWindow(QMainWindow):
                 }}
             }};
             </script>
-            <script src="https://cdn.jsdelivr.net/npm/mathjax@3/es5/tex-mml-chtml.js"></script>
+            <script src="tex-mml-chtml.js"></script>
             <style>
             body {{ font-family: "{self.ai_font_family}", sans-serif; font-size: {self.ai_font_size}pt; padding: 10px; }}
             .footer {{
@@ -961,7 +1054,8 @@ class MainWindow(QMainWindow):
             <div class="footer">Generated by {model} on {date_str}</div>
             <script>
             const md = {json.dumps(markdown_content)};
-            document.getElementById('content').innerHTML = marked.parse(md);
+            const parsed = window.marked ? (window.DOMPurify ? DOMPurify.sanitize(marked.parse(md)) : marked.parse(md)) : md;
+            document.getElementById('content').innerHTML = parsed;
             </script>
             </body>
             </html>

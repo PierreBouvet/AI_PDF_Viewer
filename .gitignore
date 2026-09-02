@@ -18,6 +18,7 @@ ENV/
 build/
 dist/
 *.spec
+!AI PDF Viewer.spec
 
 # Pytest
 .pytest_cache/
@@ -41,3 +42,4 @@ htmlcov/
 # Temp files
 temp.md
 BUILD.md
+260902_Claude_Opus_Audit.md

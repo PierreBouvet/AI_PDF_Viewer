@@ -16,17 +16,8 @@ class ImproveWorker(QThread):
         
     def run(self):
         try:
-            # Temporarily use the selected model for this request
-            original_model = self.ai_assistant.model_name
-            self.ai_assistant.model_name = self.model_name
-            
             prompt_query = f"You are going to improve the following prompt: {self.prompt_text}"
-            # Use ask_direct to avoid requiring an indexed PDF
-            answer = self.ai_assistant.ask_direct(prompt_query)
-            
-            # Restore original model
-            self.ai_assistant.model_name = original_model
-            
+            answer = self.ai_assistant.ask_direct(prompt_query, model_override=self.model_name)
             self.result_ready.emit(answer)
         except Exception as e:
             self.error_occurred.emit(str(e))
@@ -127,10 +118,12 @@ class PromptsDialog(QDialog):
 
     def populate_models(self):
         # We can try to use the client.models.list() if API key exists
-        if self.ai_assistant and self.ai_assistant.api_key:
+        import keyring
+        api_key = keyring.get_password("AIPDFViewer", "api_key")
+        if self.ai_assistant and api_key:
             try:
                 from google import genai
-                client = genai.Client(api_key=self.ai_assistant.api_key)
+                client = genai.Client(api_key=api_key)
                 models = client.models.list()
                 for m in models:
                     name = m.name.replace("models/", "")
@@ -199,7 +192,9 @@ class PromptsDialog(QDialog):
             self.list_widget.takeItem(self.list_widget.row(current))
 
     def improve_prompt(self):
-        if not self.ai_assistant or not self.ai_assistant.api_key:
+        import keyring
+        api_key = keyring.get_password("AIPDFViewer", "api_key")
+        if not self.ai_assistant or not api_key:
             QMessageBox.warning(self, "API Key Missing", "Please configure the Google API key first.")
             return
             

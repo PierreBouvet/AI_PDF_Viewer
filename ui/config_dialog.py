@@ -5,10 +5,11 @@ from PySide6.QtWidgets import (
     QFontComboBox, QSpinBox, QWidget, QFrame, QStackedWidget,
     QToolButton, QButtonGroup, QTextEdit, QCheckBox
 )
-from PySide6.QtCore import Qt, QSize, QByteArray, Signal
+from PySide6.QtCore import Qt, QSize, QByteArray, Signal, QThread
 from PySide6.QtGui import QFont, QIcon, QPixmap, QPainter, QColor
 from PySide6.QtSvg import QSvgRenderer
 from backend.config_manager import ConfigManager
+from backend.logger import logger
 
 
 def get_tab_icon(icon_name: str, fallback_glyph: str, size: int = 24) -> QIcon:
@@ -66,7 +67,7 @@ def get_tab_icon(icon_name: str, fallback_glyph: str, size: int = 24) -> QIcon:
 
                 return icon
             except Exception as e:
-                print(f"Error loading SVG {found_path}: {e}")
+                logger.error(f"Error loading SVG {found_path}: {e}")
                 return QIcon(found_path)
         else:
             return QIcon(found_path)
@@ -120,6 +121,32 @@ class MacTabButton(QToolButton):
                 font-weight: 600;
             }
         """)
+
+
+class ModelFetcherThread(QThread):
+    models_fetched = Signal(list)
+    error_occurred = Signal(str)
+
+    def __init__(self, api_key: str):
+        super().__init__()
+        self.api_key = api_key
+
+    def run(self):
+        try:
+            from google import genai
+            client = genai.Client(api_key=self.api_key)
+            models = client.models.list()
+            
+            model_names = []
+            for m in models:
+                if 'embed' in m.name.lower():
+                    continue
+                name = m.name.replace("models/", "")
+                if 'gemini' in name.lower() and 'vision' not in name.lower():
+                    model_names.append(name)
+            self.models_fetched.emit(model_names)
+        except Exception as e:
+            self.error_occurred.emit(str(e))
 
 
 class ConfigDialog(QDialog):
@@ -416,34 +443,29 @@ class ConfigDialog(QDialog):
         self.fetch_btn.setEnabled(False)
         self.model_combo.clear()
         
-        from PySide6.QtWidgets import QApplication
-        QApplication.processEvents()
-        
-        try:
-            from google import genai
-            client = genai.Client(api_key=api_key)
-            models = client.models.list()
-            
-            model_names = []
-            for m in models:
-                if 'embed' in m.name.lower():
-                    continue
-                name = m.name.replace("models/", "")
-                if 'gemini' in name.lower() and 'vision' not in name.lower():
-                    model_names.append(name)
-            
-            if model_names:
-                self.model_combo.addItems(model_names)
-            else:
-                self.model_combo.addItem("No models found")
-                
-        except Exception as e:
-            QMessageBox.critical(self, "Error", f"Failed to fetch models:\n{str(e)}")
-            self.model_combo.addItem(self.config.model_name)
-            
-        finally:
-            self.fetch_btn.setText("Fetch Models")
-            self.fetch_btn.setEnabled(True)
+        self.fetcher = ModelFetcherThread(api_key)
+        self.fetcher.models_fetched.connect(self._on_models_fetched)
+        self.fetcher.error_occurred.connect(self._on_fetch_error)
+        self.fetcher.finished.connect(self.fetcher.deleteLater)
+        self.fetcher.start()
+
+    def _on_models_fetched(self, model_names: list):
+        self.fetch_btn.setText("Fetch Models")
+        self.fetch_btn.setEnabled(True)
+        if model_names:
+            self.model_combo.addItems(model_names)
+            # Try to select currently configured model if present
+            idx = self.model_combo.findText(self.config.model_name)
+            if idx >= 0:
+                self.model_combo.setCurrentIndex(idx)
+        else:
+            self.model_combo.addItem("No models found")
+
+    def _on_fetch_error(self, err_msg: str):
+        self.fetch_btn.setText("Fetch Models")
+        self.fetch_btn.setEnabled(True)
+        QMessageBox.critical(self, "Error", f"Failed to fetch models:\n{err_msg}")
+        self.model_combo.addItem(self.config.model_name)
 
     def accept(self):
         self.api_key = self.key_input.text().strip()
@@ -458,9 +480,6 @@ class ConfigDialog(QDialog):
         self.config.ai_font_family = self.font_combo.currentFont().family()
         self.config.ai_font_size = self.size_spin.value()
         
-        if not self.api_key:
-            QMessageBox.warning(self, "Warning", "API Key cannot be empty.")
-            return
         super().accept()
 
 

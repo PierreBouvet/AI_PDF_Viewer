@@ -57,3 +57,54 @@ def test_append_pdf_file(dummy_pdf, tmp_path):
     assert success is True
     assert doc.page_count == 3
     assert "Appended Content" in doc.get_page_text(2)
+
+def test_save_document_inplace_backup(dummy_pdf):
+    doc = PDFDocument(dummy_pdf)
+    assert doc._lock is not None
+    
+    # Add a highlight and save
+    doc.add_highlight_annotation(0, [(50, 50, 100, 70)])
+    success, err = doc.save_document()
+    
+    assert success is True
+    assert err == ""
+    assert os.path.exists(dummy_pdf)
+    assert not os.path.exists(dummy_pdf + ".backup")
+    
+    # Verify annotation saved and doc is reloadable
+    reloaded = PDFDocument(dummy_pdf)
+    assert reloaded.page_count == 2
+    annots = list(reloaded.doc[0].annots())
+    assert len(annots) >= 1
+
+def test_thread_lock_present(dummy_pdf):
+    doc = PDFDocument(dummy_pdf)
+    import threading
+    assert isinstance(doc._lock, type(threading.RLock()))
+
+def test_dirty_state_and_freetext_movement(dummy_pdf):
+    doc = PDFDocument(dummy_pdf)
+    assert not doc.is_dirty
+    
+    # Adding FreeText sets dirty
+    assert doc.add_freetext_annotation(0, (50, 50, 150, 100), "Hello FreeText")
+    assert doc.is_dirty
+    
+    annot = doc.get_annotation_at_point(0, 60, 60)
+    assert annot is not None
+    
+    # Updating text
+    assert doc.update_annotation_text(0, annot, "Updated Text")
+    
+    # Moving FreeText
+    annot = doc.get_annotation_at_point(0, 60, 60)
+    assert doc.move_annotation(0, annot, 20, 30)
+    
+    # Query at new location
+    moved_annot = doc.get_annotation_at_point(0, 80, 90)
+    assert moved_annot is not None
+    
+    # Saving resets dirty
+    success, _ = doc.save_document()
+    assert success
+    assert not doc.is_dirty

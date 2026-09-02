@@ -334,6 +334,8 @@ class PDFView(QGraphicsView):
     def update_theme(self, app_style: str = "Native macOS", color_mode: str = "Light"):
         from ui.theme_manager import ThemeManager
         self.setBackgroundBrush(ThemeManager.get_pdf_bg_color(app_style, color_mode))
+        if hasattr(self, "annotation_bar") and self.annotation_bar:
+            self.annotation_bar.update_theme(app_style, color_mode)
         
     def dragEnterEvent(self, event):
         event.ignore()

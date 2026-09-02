@@ -1,18 +1,42 @@
 import csv
 import os
+import shutil
+import sys
+from PySide6.QtCore import QStandardPaths
+from backend.logger import logger
 
 class PromptsManager:
-    def __init__(self, file_path="custom_prompts.csv"):
-        self.file_path = file_path
+    def __init__(self, file_path: str = None):
+        if file_path:
+            self.file_path = file_path
+        else:
+            app_data_dir = QStandardPaths.writableLocation(QStandardPaths.StandardLocation.AppDataLocation)
+            os.makedirs(app_data_dir, exist_ok=True)
+            self.file_path = os.path.join(app_data_dir, "custom_prompts.csv")
 
     def load_prompts(self) -> dict:
         """Returns a dict of {expression: prompt_text}"""
         prompts = {}
         if not os.path.exists(self.file_path):
-            # Create default if missing
-            self.save_prompts({
-                "Bullet summary": "Summarize this paper in bullet points. You should summarize the paper in a list of bullet points of 2 levels: the first level should summarize the basic ideas, the second levels should focus on the technical aspects regarding either presented results, methods or sources. Use at least 3 main bullet points, ideally 5 and less than 10."
-            })
+            # Check for bundled template first
+            bundled_candidates = [
+                os.path.join(getattr(sys, '_MEIPASS', ''), "custom_prompts.csv") if hasattr(sys, '_MEIPASS') else "",
+                os.path.abspath("custom_prompts.csv"),
+            ]
+            seeded = False
+            for candidate in bundled_candidates:
+                if candidate and os.path.exists(candidate) and os.path.abspath(candidate) != os.path.abspath(self.file_path):
+                    try:
+                        shutil.copy2(candidate, self.file_path)
+                        seeded = True
+                        break
+                    except Exception:
+                        pass
+            if not seeded:
+                # Create default if missing
+                self.save_prompts({
+                    "Bullet summary": "Summarize this paper in bullet points. You should summarize the paper in a list of bullet points of 2 levels: the first level should summarize the basic ideas, the second levels should focus on the technical aspects regarding either presented results, methods or sources. Use at least 3 main bullet points, ideally 5 and less than 10."
+                })
             
         try:
             with open(self.file_path, 'r', encoding='utf-8') as f:
@@ -21,15 +45,18 @@ class PromptsManager:
                     if len(row) >= 2:
                         prompts[row[0].strip()] = row[1].strip()
         except Exception as e:
-            print(f"Error loading prompts: {e}")
+            logger.error(f"Error loading prompts: {e}")
             
         return prompts
 
     def save_prompts(self, prompts: dict):
         try:
+            dir_name = os.path.dirname(self.file_path)
+            if dir_name:
+                os.makedirs(dir_name, exist_ok=True)
             with open(self.file_path, 'w', encoding='utf-8', newline='') as f:
                 writer = csv.writer(f)
                 for expr, text in prompts.items():
                     writer.writerow([expr, text])
         except Exception as e:
-            print(f"Error saving prompts: {e}")
+            logger.error(f"Error saving prompts: {e}")

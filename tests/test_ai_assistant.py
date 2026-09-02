@@ -13,9 +13,14 @@ def mock_qsettings():
     with patch("backend.ai_assistant.QSettings") as mock:
         yield mock
 
+@pytest.fixture
+def mock_keyring():
+    with patch("backend.ai_assistant.keyring") as mock:
+        mock.get_password.return_value = "fake-key"
+        yield mock
+
 def test_initialization():
-    assistant = AIAssistant("fake-key", "gemini-3.5-flash")
-    assert assistant.api_key == "fake-key"
+    assistant = AIAssistant("gemini-3.5-flash")
     assert assistant.model_name == "gemini-3.5-flash"
 
 def test_rank_available_models(mock_genai, mock_qsettings):
@@ -28,7 +33,7 @@ def test_rank_available_models(mock_genai, mock_qsettings):
     mock_client = MagicMock()
     mock_genai.Client.return_value = mock_client
     
-    assistant = AIAssistant("fake-key", "gemini-3.5-flash")
+    assistant = AIAssistant("gemini-3.5-flash")
     
     mock_model1 = MagicMock()
     mock_model1.name = "models/gemini-2.5-flash"
@@ -55,8 +60,8 @@ def test_rank_available_models(mock_genai, mock_qsettings):
     assert assistant.ranked_models[0]["name"] in ["gemini-2.5-flash", "gemini-3.5-flash"]
     assert assistant.ranked_models[-1]["name"] == "gemini-3.5-flash-lite"
 
-def test_ask_direct_error_raising(mock_genai):
-    assistant = AIAssistant("fake-key", "gemini-3.5-flash")
+def test_ask_direct_error_raising(mock_genai, mock_keyring):
+    assistant = AIAssistant("gemini-3.5-flash")
     
     # Mock client
     mock_client = MagicMock()
@@ -71,3 +76,26 @@ def test_ask_direct_error_raising(mock_genai):
     
     with pytest.raises(Exception, match="429 Quota Exceeded"):
         assistant.ask_direct("Hello")
+
+def test_ask_direct_model_override(mock_genai, mock_keyring):
+    assistant = AIAssistant("gemini-3.5-flash")
+    mock_client = MagicMock()
+    mock_genai.Client.return_value = mock_client
+    
+    mock_chat = MagicMock()
+    mock_client.chats.create.return_value = mock_chat
+    
+    class DummyResp:
+        @property
+        def text(self):
+            return "Custom model output"
+            
+    mock_chat.send_message.return_value = DummyResp()
+    
+    assistant._initialize_models()
+    result = assistant.ask_direct("Test prompt", model_override="gemini-2.5-pro")
+    
+    assert result == "Custom model output"
+    mock_client.chats.create.assert_called_with(model="gemini-2.5-pro")
+    # Persistent model name must not have been mutated
+    assert assistant.model_name == "gemini-3.5-flash"

@@ -1,11 +1,12 @@
 from PySide6.QtWidgets import QWidget, QVBoxLayout, QListWidget, QListWidgetItem, QListView, QMenu
 from PySide6.QtCore import Signal, QSize, Qt
-from PySide6.QtGui import QIcon, QPixmap, QPainter, QFont, QColor
+from PySide6.QtGui import QIcon, QPixmap, QPainter, QFont, QColor, QShortcut, QKeySequence
 from backend.pdf_document import PDFDocument
 
 class ThumbnailPanel(QWidget):
     page_selected = Signal(int)
     toggle_inclusion_requested = Signal(int)
+    delete_page_requested = Signal(int)
 
     def __init__(self, parent=None):
         super().__init__(parent)
@@ -31,6 +32,18 @@ class ThumbnailPanel(QWidget):
         self.document = None
         self.excluded_pages = set()
         self.included_pages = set()
+        
+        # Shortcuts for deletion
+        self.del_shortcut = QShortcut(QKeySequence(Qt.Key.Key_Delete), self.list_widget)
+        self.del_shortcut.activated.connect(self._on_delete_shortcut)
+        self.back_shortcut = QShortcut(QKeySequence(Qt.Key.Key_Backspace), self.list_widget)
+        self.back_shortcut.activated.connect(self._on_delete_shortcut)
+
+    def _on_delete_shortcut(self):
+        current = self.list_widget.currentItem()
+        if current:
+            page_index = current.data(Qt.ItemDataRole.UserRole)
+            self.delete_page_requested.emit(page_index)
         
     def set_document(self, doc: PDFDocument, excluded_pages: set = None, included_pages: set = None):
         self.document = doc
@@ -139,6 +152,9 @@ class ThumbnailPanel(QWidget):
         is_ai = self.document.is_ai_generated(page_index)
         
         menu = QMenu(self)
+        delete_action = menu.addAction("Delete Page")
+        menu.addSeparator()
+        
         if is_ai:
             if page_index in self.included_pages:
                 action = menu.addAction("Remove from AI Context")
@@ -151,7 +167,9 @@ class ThumbnailPanel(QWidget):
                 action = menu.addAction("Remove from AI Context")
                 
         selected_action = menu.exec(self.list_widget.mapToGlobal(pos))
-        if selected_action == action:
+        if selected_action == delete_action:
+            self.delete_page_requested.emit(page_index)
+        elif selected_action == action:
             self.toggle_inclusion_requested.emit(page_index)
 
     def resizeEvent(self, event):
