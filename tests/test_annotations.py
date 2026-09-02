@@ -36,6 +36,33 @@ def test_add_highlight_annotation(sample_pdf):
     assert annots[0].type[0] == fitz.PDF_ANNOT_HIGHLIGHT
 
 
+def test_multiline_highlight_delete_all_at_once(sample_pdf):
+    # Add multi-line highlight across 3 lines
+    rects = [
+        (50, 90, 150, 110),
+        (50, 120, 200, 140),
+        (50, 150, 180, 170)
+    ]
+    assert sample_pdf.add_highlight_annotation(0, rects)
+    assert sample_pdf.save_document()[0]
+    
+    # Verify only 1 unified annotation exists on the page
+    page = sample_pdf.doc[0]
+    annots = list(page.annots())
+    assert len(annots) == 1
+    
+    # Query on line 2
+    annot_on_line2 = sample_pdf.get_annotation_at_point(0, 100, 130)
+    assert annot_on_line2 is not None
+    assert annot_on_line2.type[1] == "Highlight"
+    
+    # Delete the highlight from line 2
+    assert sample_pdf.delete_annotation(0, annot_on_line2)
+    
+    # Verify all lines are deleted at once
+    assert len(list(sample_pdf.doc[0].annots())) == 0
+
+
 def test_get_text_range_rects(sample_pdf):
     # Select from "This" to "paragraph"
     text, rects = sample_pdf.get_text_range_rects(0, (50, 95), (160, 95))

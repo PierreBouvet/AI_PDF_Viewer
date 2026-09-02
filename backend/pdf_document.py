@@ -196,15 +196,15 @@ class PDFDocument:
                     pass
 
     def add_highlight_annotation(self, page_number: int, rects: List[Tuple[float, float, float, float]]) -> bool:
-        """Add standard PDF highlight annotations over a list of rectangles."""
+        """Add standard PDF highlight annotation over rectangles (single unified multi-line annotation)."""
         if not self.doc or page_number < 0 or page_number >= len(self.doc) or not rects:
             return False
         try:
             page = self.doc[page_number]
-            for r in rects:
-                annot = page.add_highlight_annot(fitz.Rect(*r))
-                annot.set_colors(stroke=(1.0, 0.9, 0.0))
-                annot.update()
+            quads = [fitz.Rect(*r).quad for r in rects]
+            annot = page.add_highlight_annot(quads=quads)
+            annot.set_colors(stroke=(1.0, 0.9, 0.0))
+            annot.update()
             return True
         except Exception as e:
             print(f"Error adding highlight annot: {e}")
@@ -309,6 +309,25 @@ class PDFDocument:
             point = fitz.Point(x, y)
             annots = list(page.annots())
             for annot in reversed(annots):
+                # Check for highlight quad vertices first if available
+                if annot.type[1] == "Highlight" and getattr(annot, "vertices", None):
+                    verts = annot.vertices
+                    matched = False
+                    for i in range(0, len(verts), 4):
+                        chunk = verts[i:i+4]
+                        if len(chunk) == 4:
+                            min_x = min(p[0] for p in chunk) - tolerance
+                            max_x = max(p[0] for p in chunk) + tolerance
+                            min_y = min(p[1] for p in chunk) - tolerance
+                            max_y = max(p[1] for p in chunk) + tolerance
+                            if min_x <= x <= max_x and min_y <= y <= max_y:
+                                matched = True
+                                break
+                    if matched:
+                        annot.parent_page = page
+                        return annot
+                
+                # Default / fallback bounding rect check
                 r = fitz.Rect(annot.rect)
                 r_expanded = fitz.Rect(r.x0 - tolerance, r.y0 - tolerance, r.x1 + tolerance, r.y1 + tolerance)
                 if r_expanded.contains(point):
