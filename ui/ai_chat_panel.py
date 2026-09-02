@@ -10,7 +10,14 @@ class ChatWebPage(QWebEnginePage):
     double_clicked_idx = Signal(int)
     append_pdf_idx = Signal(int)
     edit_msg_idx = Signal(int)
+    open_settings_requested = Signal()
     
+    def acceptNavigationRequest(self, url, _type, isMainFrame):
+        if url.scheme() == "action" and url.host() == "open_ai_settings":
+            self.open_settings_requested.emit()
+            return False
+        return super().acceptNavigationRequest(url, _type, isMainFrame)
+        
     def javaScriptConsoleMessage(self, level, message, lineNumber, sourceId):
         if message.startswith("DOUBLE_CLICK_IDX:"):
             try:
@@ -42,6 +49,7 @@ class AIChatPanel(QWidget):
     index_requested = Signal()
     fallback_model_selected = Signal(str)
     append_requested = Signal(dict)
+    open_settings_requested = Signal()
     
     def __init__(self, parent=None, app_style="Native macOS", color_mode="Light"):
         super().__init__(parent)
@@ -67,6 +75,7 @@ class AIChatPanel(QWidget):
         self.web_page.double_clicked_idx.connect(self.request_save_message)
         self.web_page.append_pdf_idx.connect(self.request_append_message)
         self.web_page.edit_msg_idx.connect(self.request_edit_message)
+        self.web_page.open_settings_requested.connect(self.open_settings_requested)
         self.web_view.setPage(self.web_page)
         self.web_view.setHtml(self._get_html_template(), get_assets_base_url())
         layout.addWidget(self.web_view)
@@ -348,6 +357,16 @@ class AIChatPanel(QWidget):
                         }
                     }, 1000);
                 }
+                
+                function addSystemError(errorMsg) {
+                    hideLoading();
+                    const container = document.getElementById('chat-container');
+                    const msgDiv = document.createElement('div');
+                    msgDiv.className = 'message system-message';
+                    msgDiv.innerHTML = `<div style="color:#d93025; margin-bottom: 10px;"><b>Error:</b> ${sanitizeText(errorMsg)}<br><br>You can change the model <a href="action://open_ai_settings" style="color:#1a73e8; text-decoration:underline;">here</a>.</div>`;
+                    container.appendChild(msgDiv);
+                    window.scrollTo(0, document.body.scrollHeight);
+                }
 
                 function addMessage(sender, text, isMarkdown, idx) {
                     const container = document.getElementById('chat-container');
@@ -542,6 +561,11 @@ class AIChatPanel(QWidget):
     def add_system_message(self, message: str):
         self.hide_loading()
         js = f"addMessage('system', {json.dumps(message)}, false);"
+        self.web_view.page().runJavaScript(js)
+
+    def add_system_error(self, error_msg: str):
+        self.hide_loading()
+        js = f"addSystemError({json.dumps(error_msg)});"
         self.web_view.page().runJavaScript(js)
 
     def start_countdown(self, seconds: int):

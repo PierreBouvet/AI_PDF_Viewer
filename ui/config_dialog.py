@@ -152,7 +152,7 @@ class ModelFetcherThread(QThread):
 class ConfigDialog(QDialog):
     theme_preview_requested = Signal(str, str)
     
-    def __init__(self, parent=None, current_api_key=""):
+    def __init__(self, parent=None, current_api_key="", initial_tab=0):
         super().__init__(parent)
         self.setWindowTitle("Settings")
         self.setFixedSize(500, 420)
@@ -207,7 +207,16 @@ class ConfigDialog(QDialog):
         self.pages_stack.addWidget(self.page_chatbox)
         
         self.tab_group.idClicked.connect(self.pages_stack.setCurrentIndex)
-        self.btn_general.setChecked(True)
+        
+        if initial_tab == 1:
+            self.btn_ai.setChecked(True)
+            self.pages_stack.setCurrentIndex(1)
+        elif initial_tab == 2:
+            self.btn_chatbox.setChecked(True)
+            self.pages_stack.setCurrentIndex(2)
+        else:
+            self.btn_general.setChecked(True)
+            self.pages_stack.setCurrentIndex(0)
         
         main_layout.addWidget(self.pages_stack, stretch=1)
         

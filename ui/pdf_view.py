@@ -344,7 +344,9 @@ class PDFView(QGraphicsView):
         event.ignore()
 
     def on_page_image_loaded(self, page_number, image, zoom, page_item):
-        page_item.on_image_loaded(page_number, image, zoom)
+        import shiboken6
+        if shiboken6.isValid(page_item):
+            page_item.on_image_loaded(page_number, image, zoom)
         
     def set_document(self, doc: PDFDocument):
         self.document = doc

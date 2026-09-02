@@ -160,14 +160,19 @@ class FloatingAnnotationBar(QWidget):
         self.btn_text.clicked.connect(self._on_text_clicked)
         self.layout.addWidget(self.btn_text)
         
-        # 2. Highlight Button (3-state cycle) -> highlighter.svg / highlighter_A.svg
-        self.btn_highlight = AnnotationButton("Highlight (Click to cycle: Text recognition -> Freehand -> Off)", self)
-        self.highlight_state = 0 # 0: none, 1: text, 2: freehand
-        self.btn_highlight.setIcon(load_svg_icon("highlighter.svg", active=False, is_dark=self.is_dark))
-        self.btn_highlight.clicked.connect(self._on_highlight_clicked)
-        self.layout.addWidget(self.btn_highlight)
+        # 2. Highlight Text Button -> highlighter_A.svg
+        self.btn_hl_text = AnnotationButton("Highlight Text", self)
+        self.btn_hl_text.setIcon(load_svg_icon("highlighter_A.svg", active=False, is_dark=self.is_dark))
+        self.btn_hl_text.clicked.connect(self._on_hl_text_clicked)
+        self.layout.addWidget(self.btn_hl_text)
         
-        # 3. Note Button -> sticky-note.svg
+        # 3. Highlight Freehand Button -> highlighter.svg
+        self.btn_hl_freehand = AnnotationButton("Highlight Freehand", self)
+        self.btn_hl_freehand.setIcon(load_svg_icon("highlighter.svg", active=False, is_dark=self.is_dark))
+        self.btn_hl_freehand.clicked.connect(self._on_hl_freehand_clicked)
+        self.layout.addWidget(self.btn_hl_freehand)
+        
+        # 4. Note Button -> sticky-note.svg
         self.btn_note = AnnotationButton("Add Sticky Note", self)
         self.btn_note.setIcon(load_svg_icon("sticky-note.svg", active=False, is_dark=self.is_dark))
         self.btn_note.clicked.connect(self._on_note_clicked)
@@ -181,7 +186,8 @@ class FloatingAnnotationBar(QWidget):
         self.bg_color = QColor("#242426") if self.is_dark else QColor(255, 255, 255)
         
         self.btn_text.set_dark(self.is_dark)
-        self.btn_highlight.set_dark(self.is_dark)
+        self.btn_hl_text.set_dark(self.is_dark)
+        self.btn_hl_freehand.set_dark(self.is_dark)
         self.btn_note.set_dark(self.is_dark)
         
         self._refresh_icons()
@@ -194,14 +200,9 @@ class FloatingAnnotationBar(QWidget):
         is_hl_text = (self.active_tool == AnnotationTool.HIGHLIGHT_TEXT)
         is_hl_free = (self.active_tool == AnnotationTool.HIGHLIGHT_FREEHAND)
         
-        if is_hl_text:
-            icon_file = "highlighter_A.svg" if os.path.exists(os.path.join("icons", "highlighter_A.svg")) else "highlighter.svg"
-            self.btn_highlight.setIcon(load_svg_icon(icon_file, active=True, is_dark=self.is_dark))
-        elif is_hl_free:
-            self.btn_highlight.setIcon(load_svg_icon("highlighter.svg", active=True, is_dark=self.is_dark))
-        else:
-            self.btn_highlight.setIcon(load_svg_icon("highlighter.svg", active=False, is_dark=self.is_dark))
-            
+        self.btn_hl_text.setIcon(load_svg_icon("highlighter_A.svg", active=is_hl_text, is_dark=self.is_dark))
+        self.btn_hl_freehand.setIcon(load_svg_icon("highlighter.svg", active=is_hl_free, is_dark=self.is_dark))
+        
         is_note = (self.active_tool == AnnotationTool.NOTE)
         self.btn_note.setIcon(load_svg_icon("sticky-note.svg", active=is_note, is_dark=self.is_dark))
 
@@ -255,16 +256,17 @@ class FloatingAnnotationBar(QWidget):
         else:
             self.set_tool(AnnotationTool.TEXT_BOX)
 
-    def _on_highlight_clicked(self):
-        if self.highlight_state == 0:
-            self.highlight_state = 1
-            self.set_tool(AnnotationTool.HIGHLIGHT_TEXT)
-        elif self.highlight_state == 1:
-            self.highlight_state = 2
-            self.set_tool(AnnotationTool.HIGHLIGHT_FREEHAND)
-        else:
-            self.highlight_state = 0
+    def _on_hl_text_clicked(self):
+        if self.active_tool == AnnotationTool.HIGHLIGHT_TEXT:
             self.set_tool(AnnotationTool.NONE)
+        else:
+            self.set_tool(AnnotationTool.HIGHLIGHT_TEXT)
+
+    def _on_hl_freehand_clicked(self):
+        if self.active_tool == AnnotationTool.HIGHLIGHT_FREEHAND:
+            self.set_tool(AnnotationTool.NONE)
+        else:
+            self.set_tool(AnnotationTool.HIGHLIGHT_FREEHAND)
 
     def _on_note_clicked(self):
         if self.active_tool == AnnotationTool.NOTE:
@@ -282,23 +284,11 @@ class FloatingAnnotationBar(QWidget):
         is_hl_text = (tool == AnnotationTool.HIGHLIGHT_TEXT)
         is_hl_free = (tool == AnnotationTool.HIGHLIGHT_FREEHAND)
         
-        if is_hl_text:
-            self.highlight_state = 1
-            self.btn_highlight.set_active(True)
-            # Use highlighter_A.svg for text recognition highlighter
-            icon_file = "highlighter_A.svg" if os.path.exists(os.path.join("icons", "highlighter_A.svg")) else "highlighter.svg"
-            self.btn_highlight.setIcon(load_svg_icon(icon_file, active=True))
-            self.btn_highlight.setToolTip("Highlight: Active text recognition (Click for free-hand)")
-        elif is_hl_free:
-            self.highlight_state = 2
-            self.btn_highlight.set_active(True)
-            self.btn_highlight.setIcon(load_svg_icon("highlighter.svg", active=True))
-            self.btn_highlight.setToolTip("Highlight: Free-hand marker (Click to turn off)")
-        else:
-            self.highlight_state = 0
-            self.btn_highlight.set_active(False)
-            self.btn_highlight.setIcon(load_svg_icon("highlighter.svg", active=False))
-            self.btn_highlight.setToolTip("Highlight (Click to cycle: Text recognition -> Freehand -> Off)")
+        self.btn_hl_text.set_active(is_hl_text)
+        self.btn_hl_text.setIcon(load_svg_icon("highlighter_A.svg", active=is_hl_text))
+        
+        self.btn_hl_freehand.set_active(is_hl_free)
+        self.btn_hl_freehand.setIcon(load_svg_icon("highlighter.svg", active=is_hl_free))
             
         is_note = (tool == AnnotationTool.NOTE)
         self.btn_note.set_active(is_note)

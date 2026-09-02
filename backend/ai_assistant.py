@@ -80,31 +80,9 @@ class AIAssistant:
             
             clean_available = [m.replace("models/", "") for m in available_models]
             
-            # Use a pro model for classification
-            pro_model = next((m for m in clean_available if "pro" in m), "gemini-2.5-flash")
-            
-            prompt = (
-                f"Here are available Gemini models: {clean_available}. "
-                "Rank them from best suited to least well suited for a PDF reading and analysis application. "
-                "Consider context length and reasoning capability. "
-                "Return exactly the top 10 as a JSON list of strings (e.g. ['gemini-2.5-flash', ...]). Do not return markdown, just the JSON array."
-            )
-            
-            chat = client.chats.create(model=pro_model)
-            response = chat.send_message(prompt)
-            
-            # Extract JSON list safely
-            text = response.text.replace("```json", "").replace("```", "").strip()
-            top_10 = json.loads(text)
-            
-            # Filter and validate only models that actually exist
-            valid_top = [m.replace("models/", "") for m in top_10 if m.replace("models/", "") in clean_available]
-            if not valid_top:
-                valid_top = clean_available[:10]
-            
             # Attach quota info and sort by fewest restrictions (highest RPM/RPD)
             models_with_quota = []
-            for base_name in valid_top:
+            for base_name in clean_available:
                 quota = FREE_TIER_QUOTAS.get(base_name, {"RPM": 0, "RPD": 0})
                 models_with_quota.append({
                     "name": base_name,

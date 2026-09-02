@@ -422,6 +422,7 @@ class MainWindow(QMainWindow):
         self.pdf_view.page_changed.connect(self.thumbnail_panel.set_current_page)
         self.pdf_view.text_action_requested.connect(self.handle_text_action)
         self.chat_panel.fallback_model_selected.connect(self.on_fallback_selected)
+        self.chat_panel.open_settings_requested.connect(self.open_ai_settings)
         
         self.worker = None
         self.indexer = None
@@ -492,16 +493,20 @@ class MainWindow(QMainWindow):
         self.config.model_name = model_name
         QMessageBox.information(self, "Model Switched", f"Switched to {model_name}. Please retry your last action.")
         
-    def open_config(self):
+    def open_ai_settings(self):
+        self.open_config(initial_tab=1)
+
+    def open_config(self, initial_tab=0):
         old_model = self.config.model_name
         try:
+            import keyring
             old_api_key = keyring.get_password("AIPDFViewer", "api_key") or ""
         except Exception:
             old_api_key = ""
         old_style = self.config.app_style
         old_mode = self.config.color_mode
         
-        dialog = ConfigDialog(self, old_api_key)
+        dialog = ConfigDialog(self, old_api_key, initial_tab=initial_tab)
         dialog.theme_preview_requested.connect(lambda s, m: self.update_ui_theme(preview_style=s, preview_mode=m))
         
         if dialog.exec():
@@ -886,18 +891,8 @@ class MainWindow(QMainWindow):
         self.worker.start()
         
     def on_worker_error(self, error_msg: str):
-        if "429" in error_msg or "Quota" in error_msg or "ResourceExhausted" in error_msg:
-            import re
-            match = re.search(r'retry in (\d+\.?\d*)s', error_msg)
-            seconds = int(float(match.group(1))) if match else 60
-            self.chat_panel.start_countdown(seconds)
-            
-            ranked_models = getattr(self.ai_assistant, "ranked_models", [])
-            if ranked_models:
-                self.chat_panel.show_fallback_ui(ranked_models, self.ai_assistant.model_name)
-            self.statusBar().showMessage("Google API Free Tier Quota Exceeded. See chat panel.", 10000)
-        else:
-            self.statusBar().showMessage(f"AI Assistant Error: {error_msg}", 10000)
+        self.chat_panel.add_system_error(error_msg)
+        self.statusBar().showMessage("AI Error occurred. See chat panel.", 10000)
 
     def on_ai_response(self, response: str, action_type: str, original_prompt: str, display_title: str):
         self.add_log("Response received from AI model")
