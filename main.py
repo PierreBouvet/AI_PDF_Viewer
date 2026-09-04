@@ -7,6 +7,10 @@ from ui.main_window import MainWindow
 
 DEBUG = False
 
+# Default fallback model when no specific model has been selected or saved.
+# Change this model identifier here if a different fallback model is preferred in the future.
+DEFAULT_FALLBACK_MODEL = "gemini-flash-lite-latest"
+
 class PDFViewerApp(QApplication):
     def __init__(self, argv):
         super().__init__(argv)

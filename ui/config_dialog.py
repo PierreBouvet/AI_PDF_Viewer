@@ -372,7 +372,11 @@ class ConfigDialog(QDialog):
         model_group.addWidget(model_header)
         
         self.model_combo = QComboBox()
-        self.model_combo.addItem(self.config.model_name)
+        current_model = self.config.model_name
+        if current_model:
+            self.model_combo.addItem(current_model)
+        else:
+            self.model_combo.addItem("gemini-flash-lite-latest (Default)")
         model_group.addWidget(self.model_combo)
         
         layout.addLayout(model_group)

@@ -13,6 +13,7 @@ class PDFDocument:
         self.doc: Optional[fitz.Document] = None
         self.is_dirty = False
         self._lock = threading.RLock()
+        self._words_cache = {}
         if file_path:
             self.load(file_path)
             
@@ -23,15 +24,18 @@ class PDFDocument:
                 self.doc = fitz.open(file_path)
                 self.file_path = file_path
                 self.is_dirty = False
+                self._words_cache.clear()
                 return True
             except Exception as e:
                 logger.error(f"Error loading PDF: {e}")
                 self.doc = None
+                self._words_cache.clear()
                 return False
             
     def close(self):
         """Close the document."""
         with self._lock:
+            self._words_cache.clear()
             if self.doc:
                 try:
                     self.doc.close()
@@ -54,6 +58,7 @@ class PDFDocument:
             try:
                 self.doc.delete_page(page_number)
                 self.is_dirty = True
+                self.invalidate_cache()
                 return True
             except Exception as e:
                 logger.error(f"Error deleting page: {e}")
@@ -67,24 +72,36 @@ class PDFDocument:
             rect = self.doc[page_number].rect
             return (rect.width, rect.height)
         
-    def get_page_image(self, page_number: int, zoom_factor: float = 1.0, dpi_scale: float = 2.0) -> Optional[QImage]:
-        """Render a page to a QImage, supporting high DPI scaling."""
+    def get_page_image(self, page_number: int, zoom_factor: float = 1.0, dpi_scale: float = 2.0, max_zoom: float = 2.0, clip_rect: Optional[Tuple[float, float, float, float]] = None) -> Optional[QImage]:
+        """Render a page or a clipped sub-region of a page to a QImage, supporting high DPI scaling."""
         with self._lock:
             if not self.doc or page_number < 0 or page_number >= len(self.doc):
                 return None
                 
             page = self.doc[page_number]
-            # Multiply zoom factor by the DPI scale to render at a higher resolution
-            actual_zoom = zoom_factor * dpi_scale
+            
+            fitz_clip = None
+            if clip_rect is not None:
+                # clip_rect is (x0, y0, x1, y1) in page points.
+                # When rendering a small clipped viewport tile, we don't cap zoom because the tile area is bounded.
+                fitz_clip = fitz.Rect(*clip_rect).intersect(page.rect)
+                if fitz_clip.is_empty or fitz_clip.width <= 0 or fitz_clip.height <= 0:
+                    return None
+                actual_zoom = zoom_factor * dpi_scale
+            else:
+                # Full-page overview: cap zoom factor to keep base overview memory lightweight (~8 MB)
+                effective_zoom = min(zoom_factor, max_zoom) if max_zoom > 0 else zoom_factor
+                actual_zoom = effective_zoom * dpi_scale
+                
             matrix = fitz.Matrix(actual_zoom, actual_zoom)
-            pix = page.get_pixmap(matrix=matrix)
+            pix = page.get_pixmap(matrix=matrix, clip=fitz_clip)
             
             # Convert PyMuPDF pixmap to QImage
             fmt = QImage.Format_RGBA8888 if pix.alpha else QImage.Format_RGB888
             image = QImage(pix.samples, pix.width, pix.height, pix.stride, fmt)
             # We tell the QImage about its logical DPI relation
             image.setDevicePixelRatio(dpi_scale)
-            return image.copy()
+            return image.copy() # MUST copy: pix.samples buffer is freed when pix goes out of scope
 
     def get_page_thumbnail(self, page_number: int, max_size: int = 150) -> Optional[QImage]:
         """Extract a low-resolution thumbnail image."""
@@ -153,10 +170,8 @@ class PDFDocument:
         with self._lock:
             if not self.doc:
                 return ""
-            text = ""
-            for i in range(len(self.doc)):
-                text += self.get_page_text(i) + "\n"
-            return text
+            parts = [page.get_text("text") for page in self.doc]
+            return "\n".join(parts)
 
     def is_ai_generated(self, page_index: int) -> bool:
         """Check if a specific page is AI generated."""
@@ -296,51 +311,69 @@ class PDFDocument:
                 logger.error(f"Error adding freetext annot: {e}")
                 return False
 
-    def get_text_range_rects(self, page_number: int, p0: Tuple[float, float], p1: Tuple[float, float]) -> Tuple[str, List[Tuple[float, float, float, float]]]:
-        """Get text and merged line bounding boxes between two arbitrary points in reading order."""
+    def invalidate_cache(self, page_number: Optional[int] = None):
+        """Invalidate words and rendering cache."""
+        if page_number is not None:
+            self._words_cache.pop(page_number, None)
+        else:
+            self._words_cache.clear()
+
+    def get_page_words(self, page_number: int) -> list:
+        """Extract and cache the word list for a page."""
         with self._lock:
             if not self.doc or page_number < 0 or page_number >= len(self.doc):
-                return "", []
+                return []
+            if page_number in self._words_cache:
+                return self._words_cache[page_number]
             try:
-                page = self.doc[page_number]
-                words = page.get_text("words")
-                if not words:
-                    return "", []
-                    
-                def find_closest_word_index(words_list, pt):
-                    x, y = pt
-                    for idx, w in enumerate(words_list):
-                        if w[0] <= x <= w[2] and w[1] <= y <= w[3]:
-                            return idx
-                    best_idx = 0
-                    best_dist = float("inf")
-                    for idx, w in enumerate(words_list):
-                        cx, cy = (w[0] + w[2]) / 2.0, (w[1] + w[3]) / 2.0
-                        dist = (cx - x)**2 + 4.0 * (cy - y)**2
-                        if dist < best_dist:
-                            best_dist = dist
-                            best_idx = idx
-                    return best_idx
-                    
-                idx0 = find_closest_word_index(words, p0)
-                idx1 = find_closest_word_index(words, p1)
-                i_min, i_max = min(idx0, idx1), max(idx0, idx1)
-                selected_words = words[i_min:i_max + 1]
-                
-                lines = {}
-                for w in selected_words:
-                    key = (w[5], w[6])
-                    if key not in lines:
-                        lines[key] = [w[0], w[1], w[2], w[3]]
-                    else:
-                        lines[key][0] = min(lines[key][0], w[0])
-                        lines[key][1] = min(lines[key][1], w[1])
-                        lines[key][2] = max(lines[key][2], w[2])
-                        lines[key][3] = max(lines[key][3], w[3])
-                return " ".join(w[4] for w in selected_words), [tuple(r) for r in lines.values()]
+                words = self.doc[page_number].get_text("words")
+                self._words_cache[page_number] = words
+                return words
             except Exception as e:
-                logger.error(f"Error extracting text range: {e}")
-                return "", []
+                logger.error(f"Error getting page words: {e}")
+                return []
+
+    def get_text_range_rects(self, page_number: int, p0: Tuple[float, float], p1: Tuple[float, float], words: Optional[List] = None) -> Tuple[str, List[Tuple[float, float, float, float]]]:
+        """Get text and merged line bounding boxes between two arbitrary points in reading order."""
+        if words is None:
+            words = self.get_page_words(page_number)
+        if not words:
+            return "", []
+        try:
+            def find_closest_word_index(words_list, pt):
+                x, y = pt
+                for idx, w in enumerate(words_list):
+                    if w[0] <= x <= w[2] and w[1] <= y <= w[3]:
+                        return idx
+                best_idx = 0
+                best_dist = float("inf")
+                for idx, w in enumerate(words_list):
+                    cx, cy = (w[0] + w[2]) / 2.0, (w[1] + w[3]) / 2.0
+                    dist = (cx - x)**2 + 4.0 * (cy - y)**2
+                    if dist < best_dist:
+                        best_dist = dist
+                        best_idx = idx
+                return best_idx
+                
+            idx0 = find_closest_word_index(words, p0)
+            idx1 = find_closest_word_index(words, p1)
+            i_min, i_max = min(idx0, idx1), max(idx0, idx1)
+            selected_words = words[i_min:i_max + 1]
+            
+            lines = {}
+            for w in selected_words:
+                key = (w[5], w[6])
+                if key not in lines:
+                    lines[key] = [w[0], w[1], w[2], w[3]]
+                else:
+                    lines[key][0] = min(lines[key][0], w[0])
+                    lines[key][1] = min(lines[key][1], w[1])
+                    lines[key][2] = max(lines[key][2], w[2])
+                    lines[key][3] = max(lines[key][3], w[3])
+            return " ".join(w[4] for w in selected_words), [tuple(r) for r in lines.values()]
+        except Exception as e:
+            logger.error(f"Error extracting text range: {e}")
+            return "", []
 
     def get_annotation_at_point(self, page_number: int, x: float, y: float, tolerance: float = 6.0):
         """Find topmost annotation on page_number containing point (x, y)."""
@@ -441,6 +474,46 @@ class PDFDocument:
             except Exception as e:
                 logger.error(f"Error moving annot: {e}")
                 return False
+
+    def get_annotation_text(self, page_number: int, annot) -> str:
+        """Extract text covered by an annotation (e.g. highlight or ink) or stored in it."""
+        with self._lock:
+            if not self.doc or page_number < 0 or page_number >= len(self.doc) or not annot:
+                return ""
+            try:
+                page = getattr(annot, "parent_page", None) or self.doc[page_number]
+                annot_type = annot.type[1]
+                
+                # If it's a note or text box, it may have content in info
+                stored = annot.info.get("content", "") or annot.get_text()
+                if stored and stored.strip():
+                    return stored.strip()
+                    
+                # For Highlight annotations, check quad vertices or rect clip
+                if annot_type == "Highlight" and getattr(annot, "vertices", None):
+                    verts = annot.vertices
+                    chunks = []
+                    for i in range(0, len(verts), 4):
+                        chunk = verts[i:i+4]
+                        if len(chunk) == 4:
+                            min_x = min(p[0] for p in chunk)
+                            max_x = max(p[0] for p in chunk)
+                            min_y = min(p[1] for p in chunk)
+                            max_y = max(p[1] for p in chunk)
+                            clip_rect = fitz.Rect(min_x, min_y, max_x, max_y)
+                            txt = page.get_text("text", clip=clip_rect).strip()
+                            if txt:
+                                chunks.append(txt)
+                    if chunks:
+                        return " ".join(chunks)
+
+                # Fallback to rect clip on page
+                rect = fitz.Rect(annot.rect)
+                text = page.get_text("text", clip=rect).strip()
+                return text
+            except Exception as e:
+                logger.error(f"Error getting text from annot: {e}")
+                return ""
 
     def save_document(self, output_path: str = "") -> Tuple[bool, str]:
         """Persist document and all annotations to PDF file with safe backup."""

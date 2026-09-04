@@ -11,11 +11,16 @@ class ChatWebPage(QWebEnginePage):
     append_pdf_idx = Signal(int)
     edit_msg_idx = Signal(int)
     open_settings_requested = Signal()
+    retry_requested = Signal()
     
     def acceptNavigationRequest(self, url, _type, isMainFrame):
-        if url.scheme() == "action" and url.host() == "open_ai_settings":
-            self.open_settings_requested.emit()
-            return False
+        if url.scheme() == "action":
+            if url.host() == "open_ai_settings":
+                self.open_settings_requested.emit()
+                return False
+            elif url.host() in ("retry_last_query", "retry"):
+                self.retry_requested.emit()
+                return False
         return super().acceptNavigationRequest(url, _type, isMainFrame)
         
     def javaScriptConsoleMessage(self, level, message, lineNumber, sourceId):
@@ -47,9 +52,9 @@ class AIChatPanel(QWidget):
     open_prompts_dialog = Signal()
     save_requested = Signal(dict)
     index_requested = Signal()
-    fallback_model_selected = Signal(str)
     append_requested = Signal(dict)
     open_settings_requested = Signal()
+    retry_requested = Signal()
     
     def __init__(self, parent=None, app_style="Native macOS", color_mode="Light"):
         super().__init__(parent)
@@ -76,22 +81,10 @@ class AIChatPanel(QWidget):
         self.web_page.append_pdf_idx.connect(self.request_append_message)
         self.web_page.edit_msg_idx.connect(self.request_edit_message)
         self.web_page.open_settings_requested.connect(self.open_settings_requested)
+        self.web_page.retry_requested.connect(self.retry_requested)
         self.web_view.setPage(self.web_page)
         self.web_view.setHtml(self._get_html_template(), get_assets_base_url())
         layout.addWidget(self.web_view)
-        
-        # Fallback UI
-        self.fallback_widget = QWidget()
-        fallback_layout = QHBoxLayout(self.fallback_widget)
-        fallback_layout.setContentsMargins(0, 5, 0, 5)
-        self.fallback_combo = QComboBox()
-        self.fallback_btn = QPushButton("Use next best model")
-        self.fallback_btn.setStyleSheet("background-color: #D2691E; color: white; font-weight: bold; border-radius: 4px; padding: 6px;")
-        self.fallback_btn.clicked.connect(self._on_fallback_clicked)
-        fallback_layout.addWidget(self.fallback_combo)
-        fallback_layout.addWidget(self.fallback_btn)
-        self.fallback_widget.setVisible(False)
-        layout.addWidget(self.fallback_widget)
         
         self.raw_messages = []
         
@@ -207,26 +200,6 @@ class AIChatPanel(QWidget):
         self.prompts_combo.addItem("--- Custom Input ---")
         self.prompts_combo.addItems(list(prompts.keys()))
         
-    def show_fallback_ui(self, ranked_models: list, current_model: str):
-        self.fallback_combo.clear()
-        
-        next_models = [m for m in ranked_models if m["name"] != current_model]
-        
-        for m in next_models:
-            display_text = f"{m['name']} - {m['RPD']} - {m['RPM']}"
-            self.fallback_combo.addItem(display_text, m["name"])
-            
-        self.fallback_widget.setVisible(True)
-
-    def hide_fallback_ui(self):
-        self.fallback_widget.setVisible(False)
-        
-    def _on_fallback_clicked(self):
-        if self.fallback_combo.count() > 0:
-            model_name = self.fallback_combo.currentData()
-            self.hide_fallback_ui()
-            self.fallback_model_selected.emit(model_name)
-            
     def _send_message(self):
         text = ""
         is_custom = False
@@ -259,64 +232,111 @@ class AIChatPanel(QWidget):
         self.web_view.page().runJavaScript("hideLoading();")
             
     def _get_html_template(self):
+        import secrets
+        self.csp_nonce = secrets.token_hex(16)
         chat_css = ThemeManager.get_chat_css(self.app_style, self.color_mode, self.font_family, self.font_size)
-        html = """
+        html = f"""
         <!DOCTYPE html>
         <html>
         <head>
             <meta charset="utf-8">
-            <meta http-equiv="Content-Security-Policy" content="default-src 'self' 'unsafe-inline' 'unsafe-eval' data: blob:;">
+            <meta http-equiv="Content-Security-Policy" content="default-src 'self'; script-src 'self' 'unsafe-eval' 'nonce-{self.csp_nonce}'; style-src 'self' 'unsafe-inline'; img-src 'self' data: blob:; font-src 'self' data:;">
             <script src="marked.min.js"></script>
             <script src="purify.min.js"></script>
-            <script>
-            window.MathJax = {
-                tex: {
+            <script nonce="{self.csp_nonce}">
+            window.MathJax = {{
+                tex: {{
                     inlineMath: [['$', '$'], ['\\\\(', '\\\\)']],
                     displayMath: [['$$', '$$'], ['\\\\[', '\\\\]']],
                     processEscapes: true
-                },
-                options: {
+                }},
+                options: {{
                     ignoreHtmlClass: 'tex2jax_ignore',
                     processHtmlClass: 'tex2jax_process'
-                }
-            };
+                }}
+            }};
             </script>
-            <script src="tex-mml-chtml.js"></script>
+            <script src="tex-mml-chtml.js" integrity="sha384-Wuix6BuhrWbjDBs24bXrjf4ZQ5aFeFWBuKkFekO2t8xFU0iNaLQfp2K6/1Nxveei" crossorigin="anonymous"></script>
             <style id="custom-theme-style">
                 __CHAT_CSS__
-                .loading-indicator {
+                .loading-indicator {{
                     font-style: italic;
                     color: #888;
-                }
-                .dots::after {
+                }}
+                .dots::after {{
                     content: '';
                     animation: dots 1.5s steps(4, end) infinite;
-                }
-                @keyframes dots {
-                    0%, 20% { content: ''; }
-                    40% { content: '.'; }
-                    60% { content: '..'; }
-                    80%, 100% { content: '...'; }
-                }
+                }}
+                @keyframes dots {{
+                    0%, 20% {{ content: ''; }}
+                    40% {{ content: '.'; }}
+                    60% {{ content: '..'; }}
+                    80%, 100% {{ content: '...'; }}
+                }}
             </style>
-            <script>
-                function renderMarkdownSafe(text) {
-                    if (window.marked && window.DOMPurify) {
+            <script nonce="{self.csp_nonce}">
+                document.addEventListener('DOMContentLoaded', () => {{
+                    const container = document.getElementById('chat-container');
+                    if (container) {{
+                        container.addEventListener('click', (e) => {{
+                            const target = e.target.closest('button[data-action]');
+                            if (!target || target.disabled) return;
+                            const action = target.getAttribute('data-action');
+                            const idx = target.getAttribute('data-idx');
+                            if (action === 'edit') {{
+                                console.log('EDIT_MSG_IDX:' + idx);
+                            }} else if (action === 'append') {{
+                                target.disabled = true;
+                                target.style.opacity = '0.5';
+                                target.style.cursor = 'not-allowed';
+                                console.log('APPEND_PDF_IDX:' + idx);
+                            }}
+                        }});
+                    }}
+                }});
+
+                function setAppendDisabled(idx, disabled) {{
+                    const btn = document.querySelector(`button[data-action="append"][data-idx="${{idx}}"]`);
+                    if (btn) {{
+                        btn.disabled = disabled;
+                        btn.style.opacity = disabled ? '0.5' : '1.0';
+                        btn.style.cursor = disabled ? 'not-allowed' : 'pointer';
+                    }}
+                }}
+
+                function renderMarkdownSafe(text) {{
+                    if (!window.DOMPurify) {{
+                        console.error("Security Error: DOMPurify is not available. Markdown rendering aborted.");
+                        return escapeHtml(text);
+                    }}
+                    if (window.marked) {{
                         return DOMPurify.sanitize(marked.parse(text));
-                    } else if (window.marked) {
-                        return marked.parse(text);
-                    }
-                    return text;
-                }
+                    }}
+                    return DOMPurify.sanitize(text);
+                }}
 
-                function sanitizeText(text) {
-                    if (window.DOMPurify) {
-                        return DOMPurify.sanitize(text);
-                    }
-                    return text;
-                }
+                function sanitizeText(text) {{
+                    if (!window.DOMPurify) {{
+                        console.error("Security Error: DOMPurify is not available. Raw text sanitization aborted.");
+                        return escapeHtml(text);
+                    }}
+                    return DOMPurify.sanitize(text);
+                }}
 
-                function showLoading() {
+                function escapeHtml(str) {{
+                    if (typeof str !== 'string') return '';
+                    return str.replace(/[&<>"']/g, function(m) {{
+                        return {{
+                            '&': '&amp;',
+                            '<': '&lt;',
+                            '>': '&gt;',
+                            '"': '&quot;',
+                            "'": '&#39;'
+                        }}[m];
+                    }});
+                }}
+
+                function showLoading() {{
                     hideLoading();
                     const container = document.getElementById('chat-container');
                     const msgDiv = document.createElement('div');
@@ -325,13 +345,13 @@ class AIChatPanel(QWidget):
                     msgDiv.innerHTML = '<b>AI is generating</b><span class="dots"></span>';
                     container.appendChild(msgDiv);
                     window.scrollTo(0, document.body.scrollHeight);
-                }
-                function hideLoading() {
+                }}
+                function hideLoading() {{
                     const el = document.getElementById('loading-indicator');
                     if (el) el.remove();
-                }
+                }}
 
-                function startCountdown(seconds) {
+                function startCountdown(seconds) {{
                     hideLoading();
                     const container = document.getElementById('chat-container');
                     const msgDiv = document.createElement('div');
@@ -340,183 +360,188 @@ class AIChatPanel(QWidget):
                     
                     let timeLeft = seconds;
                     let displayTime = timeLeft > 60 ? Math.ceil(timeLeft/60) + ' minutes' : timeLeft + ' seconds';
-                    msgDiv.innerHTML = `<b>API Quota Exceeded!</b><br>Please wait <span class='countdown-timer'>${displayTime}</span> before trying again.<br><i>Tip: You can switch to another model.</i>`;
+                    msgDiv.innerHTML = `<b>API Quota Exceeded!</b><br>Please wait <span class='countdown-timer'>${{displayTime}}</span> before trying again.<br><i>Tip: You can switch to another model.</i>`;
                     container.appendChild(msgDiv);
                     window.scrollTo(0, document.body.scrollHeight);
                     
                     const timerSpan = msgDiv.querySelector('.countdown-timer');
-                    const interval = setInterval(() => {
+                    const interval = setInterval(() => {{
                         timeLeft--;
-                        if (timeLeft <= 0) {
+                        if (timeLeft <= 0) {{
                             clearInterval(interval);
                             msgDiv.innerHTML = `<b>Ready!</b><br>You can try asking your question again, or switch models if the daily limit was reached.`;
-                        } else {
-                            if (timerSpan) {
+                        }} else {{
+                            if (timerSpan) {{
                                 timerSpan.innerText = timeLeft > 60 ? Math.ceil(timeLeft/60) + ' minutes' : timeLeft + ' seconds';
-                            }
-                        }
-                    }, 1000);
-                }
+                            }}
+                        }}
+                    }}, 1000);
+                }}
                 
-                function addSystemError(errorMsg) {
+                function addSystemError(errorMsg, allowRetry) {{
                     hideLoading();
                     const container = document.getElementById('chat-container');
                     const msgDiv = document.createElement('div');
                     msgDiv.className = 'message system-message';
-                    msgDiv.innerHTML = `<div style="color:#d93025; margin-bottom: 10px;"><b>Error:</b> ${sanitizeText(errorMsg)}<br><br>You can change the model <a href="action://open_ai_settings" style="color:#1a73e8; text-decoration:underline;">here</a>.</div>`;
+                    const safeError = window.DOMPurify ? DOMPurify.sanitize(errorMsg, {{ALLOWED_TAGS: [], ALLOWED_ATTR: []}}) : escapeHtml(errorMsg);
+                    let retryHtml = '';
+                    if (allowRetry !== false && errorMsg && errorMsg.indexOf('503') !== -1) {{
+                        retryHtml = ' or <a href="action://retry_last_query" style="color:#1a73e8; text-decoration:underline;">retry with the same model</a>';
+                    }}
+                    msgDiv.innerHTML = `<div style="color:#d93025; margin-bottom: 10px;"><b>Error:</b> ${{safeError}}<br><br>You can change the model <a href="action://open_ai_settings" style="color:#1a73e8; text-decoration:underline;">here</a>${{retryHtml}}.</div>`;
                     container.appendChild(msgDiv);
                     window.scrollTo(0, document.body.scrollHeight);
-                }
+                }}
 
-                function addMessage(sender, text, isMarkdown, idx) {
+                function addMessage(sender, text, isMarkdown, idx) {{
                     const container = document.getElementById('chat-container');
                     const msgDiv = document.createElement('div');
                     msgDiv.className = 'message ' + sender + '-message';
                     
-                    if (idx !== undefined && idx !== null) {
+                    if (idx !== undefined && idx !== null) {{
                         msgDiv.id = 'msg-' + idx;
-                        msgDiv.ondblclick = function() {
+                        msgDiv.ondblclick = function() {{
                             console.log("DOUBLE_CLICK_IDX:" + idx);
-                        };
+                        }};
                         msgDiv.style.cursor = "pointer";
                         msgDiv.title = "Double-click to open in new window";
-                    }
+                    }}
                     
-                    if (sender === 'user') {
+                    if (sender === 'user') {{
                         msgDiv.innerHTML = '<b>You:</b> ' + sanitizeText(text);
-                    } else if (sender === 'system') {
+                    }} else if (sender === 'system') {{
                         msgDiv.innerHTML = sanitizeText(text);
-                    } else {
+                    }} else {{
                         // AI Message
                         let html = '<b>AI:</b><br>';
-                        if (isMarkdown) {
+                        if (isMarkdown) {{
                             html += renderMarkdownSafe(text);
-                        } else {
+                        }} else {{
                             html += sanitizeText(text);
-                        }
-                        if (idx !== undefined && idx !== null) {
-                            html += `<br><button onclick="console.log('EDIT_MSG_IDX:' + ${idx})" style="margin-top:8px; margin-right:8px; padding:4px 8px; font-size:9pt; cursor:pointer; background-color:#e1e1e1; border:1px solid #ccc; border-radius:4px;">Edit Response</button>`;
-                            html += `<button onclick="console.log('APPEND_PDF_IDX:' + ${idx})" style="margin-top:8px; padding:4px 8px; font-size:9pt; cursor:pointer; background-color:#e1e1e1; border:1px solid #ccc; border-radius:4px;">Append to PDF</button>`;
-                        }
+                        }}
+                        if (idx !== undefined && idx !== null) {{
+                            html += `<br><button data-action="edit" data-idx="${{idx}}" style="margin-top:8px; margin-right:8px; padding:4px 8px; font-size:9pt; cursor:pointer; background-color:#e1e1e1; border:1px solid #ccc; border-radius:4px;">Edit Response</button>`;
+                            html += `<button data-action="append" data-idx="${{idx}}" style="margin-top:8px; padding:4px 8px; font-size:9pt; cursor:pointer; background-color:#e1e1e1; border:1px solid #ccc; border-radius:4px;">Append to PDF</button>`;
+                        }}
                         msgDiv.innerHTML = html;
-                    }
+                    }}
                     
                     container.appendChild(msgDiv);
                     triggerMathJax();
-                }
+                }}
                 
-                function addExplainMessage(parts, idx) {
+                function addExplainMessage(parts, idx) {{
                     const container = document.getElementById('chat-container');
                     const msgDiv = document.createElement('div');
                     msgDiv.className = 'message ai-message';
                     
-                    if (idx !== undefined && idx !== null) {
-                        msgDiv.ondblclick = function() {
+                    if (idx !== undefined && idx !== null) {{
+                        msgDiv.ondblclick = function() {{
                             console.log("DOUBLE_CLICK_IDX:" + idx);
-                        };
+                        }};
                         msgDiv.style.cursor = "pointer";
                         msgDiv.title = "Double-click to open in new window";
-                    }
+                    }}
                     
                     let html = '<b>AI Explain:</b><br>';
                     const titles = ["Rephrase", "Reasoning", "Contribution"];
                     
-                    for (let i = 0; i < parts.length; i++) {
+                    for (let i = 0; i < parts.length; i++) {{
                         let title = i < titles.length ? titles[i] : 'Section ' + (i+1);
                         let parsedPart = renderMarkdownSafe(parts[i]);
-                        html += `<div class='explain-section'><b>${title}</b><br>${parsedPart}</div>`;
-                    }
-                    if (idx !== undefined && idx !== null) {
-                        html += `<br><button onclick="console.log('APPEND_PDF_IDX:' + ${idx})" style="margin-top:8px; padding:4px 8px; font-size:9pt; cursor:pointer; background-color:#e1e1e1; border:1px solid #ccc; border-radius:4px;">Append to PDF</button>`;
-                    }
+                        html += `<div class='explain-section'><b>${{title}}</b><br>${{parsedPart}}</div>`;
+                    }}
+                    if (idx !== undefined && idx !== null) {{
+                        html += `<br><button data-action="append" data-idx="${{idx}}" style="margin-top:8px; padding:4px 8px; font-size:9pt; cursor:pointer; background-color:#e1e1e1; border:1px solid #ccc; border-radius:4px;">Append to PDF</button>`;
+                    }}
                     
                     msgDiv.innerHTML = html;
                     container.appendChild(msgDiv);
                     triggerMathJax();
-                }
+                }}
                 
-                function addDiscussMessage(text, idx) {
+                function addDiscussMessage(text, idx) {{
                     const container = document.getElementById('chat-container');
                     const msgDiv = document.createElement('div');
                     msgDiv.className = 'message ai-message';
                     
-                    if (idx !== undefined && idx !== null) {
+                    if (idx !== undefined && idx !== null) {{
                         msgDiv.id = 'msg-' + idx;
-                        msgDiv.ondblclick = function() {
+                        msgDiv.ondblclick = function() {{
                             console.log("DOUBLE_CLICK_IDX:" + idx);
-                        };
+                        }};
                         msgDiv.style.cursor = "pointer";
                         msgDiv.title = "Double-click to open in new window";
-                    }
+                    }}
                     
                     let parsedText = renderMarkdownSafe(text);
-                    let html = `<b>AI Discuss:</b><br><div class='discuss-section'>${parsedText}</div>`;
-                    if (idx !== undefined && idx !== null) {
-                        html += `<br><button onclick="console.log('EDIT_MSG_IDX:' + ${idx})" style="margin-top:8px; margin-right:8px; padding:4px 8px; font-size:9pt; cursor:pointer; background-color:#e1e1e1; border:1px solid #ccc; border-radius:4px;">Edit Response</button>`;
-                        html += `<button onclick="console.log('APPEND_PDF_IDX:' + ${idx})" style="margin-top:8px; padding:4px 8px; font-size:9pt; cursor:pointer; background-color:#e1e1e1; border:1px solid #ccc; border-radius:4px;">Append to PDF</button>`;
-                    }
+                    let html = `<b>AI Discuss:</b><br><div class='discuss-section'>${{parsedText}}</div>`;
+                    if (idx !== undefined && idx !== null) {{
+                        html += `<br><button data-action="edit" data-idx="${{idx}}" style="margin-top:8px; margin-right:8px; padding:4px 8px; font-size:9pt; cursor:pointer; background-color:#e1e1e1; border:1px solid #ccc; border-radius:4px;">Edit Response</button>`;
+                        html += `<button data-action="append" data-idx="${{idx}}" style="margin-top:8px; padding:4px 8px; font-size:9pt; cursor:pointer; background-color:#e1e1e1; border:1px solid #ccc; border-radius:4px;">Append to PDF</button>`;
+                    }}
                     
                     msgDiv.innerHTML = html;
                     container.appendChild(msgDiv);
                     triggerMathJax();
-                }
+                }}
                 
-                function addSummaryMessage(text, idx) {
+                function addSummaryMessage(text, idx) {{
                     const container = document.getElementById('chat-container');
                     const msgDiv = document.createElement('div');
                     msgDiv.className = 'message ai-message';
                     
-                    if (idx !== undefined && idx !== null) {
+                    if (idx !== undefined && idx !== null) {{
                         msgDiv.id = 'msg-' + idx;
-                        msgDiv.ondblclick = function() {
+                        msgDiv.ondblclick = function() {{
                             console.log("DOUBLE_CLICK_IDX:" + idx);
-                        };
+                        }};
                         msgDiv.style.cursor = "pointer";
                         msgDiv.title = "Double-click to open in new window";
-                    }
+                    }}
                     
                     let parsedText = renderMarkdownSafe(text);
-                    let html = `<b>AI Summary:</b><br><div class='summary-section'>${parsedText}</div>`;
-                    if (idx !== undefined && idx !== null) {
-                        html += `<br><button onclick="console.log('EDIT_MSG_IDX:' + ${idx})" style="margin-top:8px; margin-right:8px; padding:4px 8px; font-size:9pt; cursor:pointer; background-color:#e1e1e1; border:1px solid #ccc; border-radius:4px;">Edit Response</button>`;
-                        html += `<button onclick="console.log('APPEND_PDF_IDX:' + ${idx})" style="margin-top:8px; padding:4px 8px; font-size:9pt; cursor:pointer; background-color:#e1e1e1; border:1px solid #ccc; border-radius:4px;">Append to PDF</button>`;
-                    }
+                    let html = `<b>AI Summary:</b><br><div class='summary-section'>${{parsedText}}</div>`;
+                    if (idx !== undefined && idx !== null) {{
+                        html += `<br><button data-action="edit" data-idx="${{idx}}" style="margin-top:8px; margin-right:8px; padding:4px 8px; font-size:9pt; cursor:pointer; background-color:#e1e1e1; border:1px solid #ccc; border-radius:4px;">Edit Response</button>`;
+                        html += `<button data-action="append" data-idx="${{idx}}" style="margin-top:8px; padding:4px 8px; font-size:9pt; cursor:pointer; background-color:#e1e1e1; border:1px solid #ccc; border-radius:4px;">Append to PDF</button>`;
+                    }}
                     
                     msgDiv.innerHTML = html;
                     container.appendChild(msgDiv);
                     triggerMathJax();
-                }
+                }}
                 
-                function updateMessage(idx, newText, msgType) {
+                function updateMessage(idx, newText, msgType) {{
                     const msgDiv = document.getElementById('msg-' + idx);
                     if (!msgDiv) return;
                     
                     let html = '<b>AI' + (msgType === "chat" ? "" : " " + msgType.charAt(0).toUpperCase() + msgType.slice(1)) + ':</b><br>';
                     let parsedText = renderMarkdownSafe(newText);
                     
-                    if (msgType === "discuss") {
-                        html += `<div class='discuss-section'>${parsedText}</div>`;
-                    } else if (msgType === "summary") {
-                        html += `<div class='summary-section'>${parsedText}</div>`;
-                    } else {
+                    if (msgType === "discuss") {{
+                        html += `<div class='discuss-section'>${{parsedText}}</div>`;
+                    }} else if (msgType === "summary") {{
+                        html += `<div class='summary-section'>${{parsedText}}</div>`;
+                    }} else {{
                         html += parsedText;
-                    }
+                    }}
                     
-                    html += `<br><button onclick="console.log('EDIT_MSG_IDX:' + ${idx})" style="margin-top:8px; margin-right:8px; padding:4px 8px; font-size:9pt; cursor:pointer; background-color:#e1e1e1; border:1px solid #ccc; border-radius:4px;">Edit Response</button>`;
-                    html += `<button onclick="console.log('APPEND_PDF_IDX:' + ${idx})" style="margin-top:8px; padding:4px 8px; font-size:9pt; cursor:pointer; background-color:#e1e1e1; border:1px solid #ccc; border-radius:4px;">Append to PDF</button>`;
+                    html += `<br><button data-action="edit" data-idx="${{idx}}" style="margin-top:8px; margin-right:8px; padding:4px 8px; font-size:9pt; cursor:pointer; background-color:#e1e1e1; border:1px solid #ccc; border-radius:4px;">Edit Response</button>`;
+                    html += `<button data-action="append" data-idx="${{idx}}" style="margin-top:8px; padding:4px 8px; font-size:9pt; cursor:pointer; background-color:#e1e1e1; border:1px solid #ccc; border-radius:4px;">Append to PDF</button>`;
                     
                     msgDiv.innerHTML = html;
                     triggerMathJax();
-                }
+                }}
 
-                function triggerMathJax() {
-                    if (window.MathJax) {
-                        MathJax.typesetPromise().then(() => {
+                function triggerMathJax() {{
+                    if (window.MathJax) {{
+                        MathJax.typesetPromise().then(() => {{
                             window.scrollTo(0, document.body.scrollHeight);
-                        }).catch((err) => console.log(err.message));
-                    }
+                        }}).catch((err) => console.log(err.message));
+                    }}
                     window.scrollTo(0, document.body.scrollHeight);
-                }
+                }}
             </script>
         </head>
         <body>
@@ -563,9 +588,9 @@ class AIChatPanel(QWidget):
         js = f"addMessage('system', {json.dumps(message)}, false);"
         self.web_view.page().runJavaScript(js)
 
-    def add_system_error(self, error_msg: str):
+    def add_system_error(self, error_msg: str, allow_retry: bool = True):
         self.hide_loading()
-        js = f"addSystemError({json.dumps(error_msg)});"
+        js = f"addSystemError({json.dumps(error_msg)}, {json.dumps(allow_retry)});"
         self.web_view.page().runJavaScript(js)
 
     def start_countdown(self, seconds: int):
@@ -589,11 +614,11 @@ class AIChatPanel(QWidget):
                 dialog = EditMessageDialog(current_text, self)
                 if dialog.exec():
                     new_text = dialog.get_text()
-                    msg_data["content"] = new_text
-                    
-                    import json
-                    js = f"updateMessage({idx}, {json.dumps(new_text)}, '{action}');"
-                    self.web_view.page().runJavaScript(js)
+                    if new_text != current_text:
+                        msg_data["content"] = new_text
+                        import json
+                        js = f"updateMessage({idx}, {json.dumps(new_text)}, '{action}');"
+                        self.web_view.page().runJavaScript(js)
 
     def request_append_message(self, idx: int):
         if 0 <= idx < len(self.raw_messages):

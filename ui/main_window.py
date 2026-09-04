@@ -232,7 +232,7 @@ class PDFGenerator(QObject):
         self.finished.emit(success)
 
 class IndexingThread(QThread):
-    finished = Signal()
+    indexing_finished = Signal()
     error = Signal(str)
     
     def __init__(self, ai_assistant, file_path, excluded_pages=None, included_pages=None):
@@ -245,7 +245,7 @@ class IndexingThread(QThread):
     def run(self):
         try:
             self.ai_assistant.index_pdf(self.file_path, self.excluded_pages, self.included_pages)
-            self.finished.emit()
+            self.indexing_finished.emit()
         except Exception as e:
             self.error.emit(str(e))
 
@@ -278,15 +278,17 @@ class MainWindow(QMainWindow):
         self.ai_font_size = self.config.ai_font_size
         
         # Initialize Backend
+        from main import DEFAULT_FALLBACK_MODEL
         self.pdf_doc = PDFDocument()
-        self.ai_assistant = AIAssistant(model_name=saved_model_name)
+        self.ai_assistant = AIAssistant(model_name=saved_model_name or DEFAULT_FALLBACK_MODEL)
         self.prompts_manager = PromptsManager()
         
-        self.startup_thread = StartupTaskThread(self.ai_assistant)
-        self.startup_thread.models_ranked.connect(self.on_models_ranked)
-        self.startup_thread.error.connect(self.on_worker_error)
-        self.startup_thread.finished.connect(self.startup_thread.deleteLater)
-        self.startup_thread.start()
+        self.startup_thread = None
+        if keyring.get_password("AIPDFViewer", "api_key"):
+            self.startup_thread = StartupTaskThread(self.ai_assistant)
+            self.startup_thread.models_ranked.connect(self.on_models_ranked)
+            self.startup_thread.finished.connect(self.startup_thread.deleteLater)
+            self.startup_thread.start()
         
         # Central Splitter
         self.splitter = MainSplitter(Qt.Orientation.Horizontal)
@@ -421,12 +423,15 @@ class MainWindow(QMainWindow):
         self.thumbnail_panel.delete_page_requested.connect(self.delete_page)
         self.pdf_view.page_changed.connect(self.thumbnail_panel.set_current_page)
         self.pdf_view.text_action_requested.connect(self.handle_text_action)
-        self.chat_panel.fallback_model_selected.connect(self.on_fallback_selected)
+        self.pdf_view.annotation_changed.connect(self.thumbnail_panel.refresh_thumbnail)
         self.chat_panel.open_settings_requested.connect(self.open_ai_settings)
+        self.chat_panel.retry_requested.connect(self.retry_last_action)
         
         self.worker = None
         self.indexer = None
-        self.zombie_threads = []
+        self.last_ai_action = None
+        self.zombie_threads = set()
+        self.active_generators = set()
         
         # Initial Theme Apply
         self.update_ui_theme()
@@ -440,6 +445,28 @@ class MainWindow(QMainWindow):
             except Exception:
                 pass
         
+    def _is_thread_running(self, thread):
+        if not thread:
+            return False
+        try:
+            import shiboken6
+            if not shiboken6.isValid(thread):
+                return False
+            return thread.isRunning()
+        except Exception:
+            return False
+
+    def _on_worker_finished(self):
+        self.worker = None
+
+    def showEvent(self, event):
+        super().showEvent(event)
+        if self._is_thread_running(getattr(self, "startup_thread", None)):
+            try:
+                self.startup_thread.error.connect(self.on_worker_error)
+            except Exception:
+                pass
+
     def _on_system_theme_changed(self):
         if self.config.color_mode.lower().startswith("system") or self.config.color_mode.lower() == "auto":
             self.update_ui_theme()
@@ -488,11 +515,6 @@ class MainWindow(QMainWindow):
         self.chat_panel.show_index_button()
         self.chat_panel.set_index_status("unloaded")
         
-    def on_fallback_selected(self, model_name: str):
-        self.ai_assistant.set_model_name(model_name)
-        self.config.model_name = model_name
-        QMessageBox.information(self, "Model Switched", f"Switched to {model_name}. Please retry your last action.")
-        
     def open_ai_settings(self):
         self.open_config(initial_tab=1)
 
@@ -513,12 +535,6 @@ class MainWindow(QMainWindow):
             new_model = self.config.model_name
             new_api_key = dialog.api_key or ""
             
-            self.ai_assistant.set_model_name(new_model)
-            self.ai_font_family = self.config.ai_font_family
-            self.ai_font_size = self.config.ai_font_size
-            
-            self.update_ui_theme()
-            
             # Save API key to Keychain
             try:
                 if new_api_key:
@@ -531,25 +547,33 @@ class MainWindow(QMainWindow):
             except Exception as e:
                 logger.error(f"Failed to save to keychain: {e}")
             
+            # Apply appearance options (theme, font)
+            self.ai_font_family = self.config.ai_font_family
+            self.ai_font_size = self.config.ai_font_size
+            self.chat_panel.update_font(self.ai_font_family, self.ai_font_size)
+            self.update_ui_theme()
+            
             model_changed = (old_model != new_model and bool(new_model))
             key_changed = (old_api_key != new_api_key)
             
+            if model_changed:
+                self.ai_assistant.set_model_name(new_model)
+
             if model_changed or key_changed:
+                self.ai_assistant.reset_client()
+                self.chat_panel.clear_chat()
+                self.chat_panel.set_index_status("unloaded")
+                self.ai_assistant.clear_index()
                 if self.pdf_doc.doc:
-                    self.chat_panel.clear_chat()
-                    self.chat_panel.set_index_status("unloaded")
-                    self.ai_assistant.clear_index()
+                    self.chat_panel.add_system_message(f"Document: {os.path.basename(self.pdf_doc.file_path)}<br><br><b>Click the 'Index PDF' button below</b> to index with the updated configuration.")
                     self.chat_panel.show_index_button()
                     
-                    if model_changed:
-                        self.add_log(f"Model changed to {new_model}. Please re-index the document.")
-                        QMessageBox.information(self, "Model Changed", f"AI model changed to {new_model}.\nPlease re-index the document to continue.")
-                    else:
-                        self.add_log("API Key updated. Please re-index the document.")
-                        QMessageBox.information(self, "API Key Updated", "API key updated successfully.\nPlease re-index the document to continue.")
-            elif self.pdf_doc.doc and not self.ai_assistant.uploaded_file and new_api_key:
-                # If we just added an API key and couldn't index before
-                self.index_current_document()
+                if model_changed:
+                    self.add_log(f"Model changed to {new_model}. Please re-index the document.")
+                    QMessageBox.information(self, "Model Changed", f"AI model changed to {new_model}.\nPlease re-index the document to continue.")
+                else:
+                    self.add_log("API Key updated. Please re-index the document.")
+                    QMessageBox.information(self, "API Key Updated", "API key updated successfully.\nPlease re-index the document to continue.")
         else:
             # Revert theme preview back to saved configuration
             self.update_ui_theme(preview_style=old_style, preview_mode=old_mode)
@@ -694,12 +718,17 @@ class MainWindow(QMainWindow):
 
     def load_pdf(self, file_path):
         # Safely handle any running threads so they don't get destroyed mid-execution
-        if self.worker and self.worker.isRunning():
-            self.zombie_threads.append(self.worker)
-            self.worker = None
-        if self.indexer and self.indexer.isRunning():
-            self.zombie_threads.append(self.indexer)
-            self.indexer = None
+        if self._is_thread_running(self.worker):
+            thread = self.worker
+            self.zombie_threads.add(thread)
+            thread.finished.connect(lambda t=thread: self.zombie_threads.discard(t))
+        self.worker = None
+
+        if self._is_thread_running(self.indexer):
+            thread = self.indexer
+            self.zombie_threads.add(thread)
+            thread.finished.connect(lambda t=thread: self.zombie_threads.discard(t))
+        self.indexer = None
             
         # Clear previous PDF and UI state
         self.pdf_container.setCurrentIndex(0)
@@ -711,6 +740,7 @@ class MainWindow(QMainWindow):
         self.chat_panel.clear_chat()
         self.chat_panel.set_index_status("unloaded")
         self.ai_assistant.clear_index()
+        self.ai_assistant.reset_client()
         self.excluded_pages.clear()
         self.included_pages.clear()
         
@@ -731,9 +761,6 @@ class MainWindow(QMainWindow):
             self.add_log(f"PDF loaded: {os.path.basename(file_path)}")
         else:
             QMessageBox.critical(self, "Error", "Failed to load PDF.")
-            
-        # Clean up finished zombie threads
-        self.zombie_threads = [t for t in self.zombie_threads if t.isRunning()]
 
     def dragEnterEvent(self, event):
         if event.mimeData().hasUrls():
@@ -803,40 +830,51 @@ class MainWindow(QMainWindow):
             self.chat_panel.add_system_message("Please configure Google API Key to enable AI features.")
             return
             
-        if self.indexer and self.indexer.isRunning():
-            self.zombie_threads.append(self.indexer)
-            self.indexer = None
+        if self._is_thread_running(self.indexer):
+            thread = self.indexer
+            self.zombie_threads.add(thread)
+            thread.finished.connect(lambda t=thread: self.zombie_threads.discard(t))
+        self.indexer = None
             
+        self.last_ai_action = ("index", None)
         self.chat_panel.set_index_status("processing")
         file_path = self.pdf_doc.file_path
         
         self.indexer = IndexingThread(self.ai_assistant, file_path, self.excluded_pages, self.included_pages)
-        self.indexer.finished.connect(self.on_indexing_finished)
+        self.indexer.indexing_finished.connect(self.on_indexing_finished)
         self.indexer.error.connect(self.on_indexing_error)
         self.indexer.start()
         
     def on_indexing_finished(self):
+        if self.indexer:
+            self.indexer.deleteLater()
+            self.indexer = None
+        if not getattr(self.ai_assistant, "chat_session", None):
+            self.on_indexing_error("Indexing session could not be established.")
+            return
         model = getattr(self.ai_assistant, "model_name", "")
         self.chat_panel.set_index_status("indexed", model)
         self.add_log(f"Document indexed successfully by {model}" if model else "Document indexed successfully")
         
     def on_indexing_error(self, error_msg: str):
+        if self.indexer:
+            self.indexer.deleteLater()
+            self.indexer = None
+        self.ai_assistant.clear_index()
+        self.chat_panel.set_index_status("unloaded")
+        self.chat_panel.show_index_button()
+        self.chat_panel.add_system_error(f"Indexing failed: {error_msg}", allow_retry=False)
+        
         # Check if it's a quota error
         if "429" in error_msg or "Quota exceeded" in error_msg or "ResourceExhausted" in error_msg:
-            msg = "You have exceeded your Google API free tier quota.\n\nPlease wait a minute before trying again."
             import re
             match = re.search(r'retry in (\d+\.?\d*)s', error_msg)
             seconds = int(float(match.group(1))) if match else 60
             
             self.statusBar().showMessage(f"API Quota Exceeded. Please wait {seconds} seconds before trying again.", 10000)
             self.chat_panel.start_countdown(seconds)
-            
-            ranked_models = getattr(self.ai_assistant, "ranked_models", [])
-            if ranked_models:
-                self.chat_panel.show_fallback_ui(ranked_models, self.ai_assistant.model_name)
         else:
             self.statusBar().showMessage(f"Indexing Error: {error_msg}", 10000)
-            self.chat_panel.set_index_status("unloaded")
         
     def on_models_ranked(self, ranked_models: list):
         if ranked_models:
@@ -868,18 +906,35 @@ class MainWindow(QMainWindow):
             
         self.chat_panel.add_user_message(prompt)
         
-        if not self.ai_assistant.uploaded_file:
+        if not self.ai_assistant.uploaded_file or not getattr(self.ai_assistant, "chat_session", None):
             self.chat_panel.add_system_message("Please click 'Index PDF to enable AI Q&A' below before using AI features that require document context.")
+            self.chat_panel.show_index_button()
             return
             
+        self.last_ai_action = ("worker", {
+            "question": prompt,
+            "action_type": action_type,
+            "use_direct": False,
+            "original_prompt": prompt,
+            "display_title": display_title
+        })
+        self.chat_panel.show_loading()
         self.worker = WorkerThread(self.ai_assistant, prompt, action_type, original_prompt=prompt, display_title=display_title)
         self.worker.result_ready.connect(self.on_ai_response)
         self.worker.error.connect(self.on_worker_error)
+        self.worker.finished.connect(self._on_worker_finished)
         self.worker.finished.connect(self.worker.deleteLater)
         self.worker.start()
         
     def handle_chat_message(self, text: str, is_custom: bool = False, display_title: str = ""):
         self.add_log("Prompt sent to AI model")
+        self.last_ai_action = ("worker", {
+            "question": text,
+            "action_type": "chat",
+            "use_direct": is_custom,
+            "original_prompt": text,
+            "display_title": display_title
+        })
         if is_custom:
             self.worker = WorkerThread(self.ai_assistant, text, "chat", use_direct=True, original_prompt=text, display_title=display_title)
         else:
@@ -887,8 +942,42 @@ class MainWindow(QMainWindow):
             
         self.worker.result_ready.connect(self.on_ai_response)
         self.worker.error.connect(self.on_worker_error)
+        self.worker.finished.connect(self._on_worker_finished)
         self.worker.finished.connect(self.worker.deleteLater)
         self.worker.start()
+        
+    def retry_last_action(self):
+        if not hasattr(self, "last_ai_action") or not self.last_ai_action:
+            return
+            
+        action_kind, payload = self.last_ai_action
+        if action_kind == "index":
+            if self._is_thread_running(self.indexer):
+                return
+            self.index_current_document()
+        elif action_kind == "worker" and payload:
+            if self._is_thread_running(self.worker):
+                return
+            if not payload.get("use_direct") and (not self.ai_assistant.uploaded_file or not getattr(self.ai_assistant, "chat_session", None)):
+                self.chat_panel.add_system_message("Please index the document first before retrying.")
+                self.chat_panel.show_index_button()
+                return
+                
+            self.chat_panel.show_loading()
+            self.add_log("Retrying AI request with the same model...")
+            self.worker = WorkerThread(
+                self.ai_assistant,
+                payload["question"],
+                payload["action_type"],
+                use_direct=payload["use_direct"],
+                original_prompt=payload["original_prompt"],
+                display_title=payload["display_title"]
+            )
+            self.worker.result_ready.connect(self.on_ai_response)
+            self.worker.error.connect(self.on_worker_error)
+            self.worker.finished.connect(self._on_worker_finished)
+            self.worker.finished.connect(self.worker.deleteLater)
+            self.worker.start()
         
     def on_worker_error(self, error_msg: str):
         self.chat_panel.add_system_error(error_msg)
@@ -1049,7 +1138,7 @@ class MainWindow(QMainWindow):
             <div class="footer">Generated by {model} on {date_str}</div>
             <script>
             const md = {json.dumps(markdown_content)};
-            const parsed = window.marked ? (window.DOMPurify ? DOMPurify.sanitize(marked.parse(md)) : marked.parse(md)) : md;
+            const parsed = (window.marked && window.DOMPurify) ? DOMPurify.sanitize(marked.parse(md)) : (window.DOMPurify ? DOMPurify.sanitize(md) : md);
             document.getElementById('content').innerHTML = parsed;
             </script>
             </body>
@@ -1062,8 +1151,11 @@ class MainWindow(QMainWindow):
             self.chat_panel.add_system_message("Generating PDF with MathJax support, please wait...")
             
             self.pdf_generator = PDFGenerator(html, temp_path)
+            self.active_generators.add(self.pdf_generator)
+            generator = self.pdf_generator
             
             def on_pdf_ready(success):
+                self.active_generators.discard(generator)
                 if success:
                     merged, err_msg = self.pdf_doc.append_pdf_file(temp_path, file_path)
                     if merged:
@@ -1086,7 +1178,7 @@ class MainWindow(QMainWindow):
                     except:
                         pass
             
-            self.pdf_generator.finished.connect(on_pdf_ready)
+            generator.finished.connect(on_pdf_ready)
 
     def add_log(self, message: str):
         from datetime import datetime

@@ -35,6 +35,17 @@ def test_get_page_text(dummy_pdf):
     text = doc.get_page_text(0)
     assert "Hello World" in text
 
+def test_get_all_text(dummy_pdf):
+    doc = PDFDocument(dummy_pdf)
+    all_text = doc.get_all_text()
+    assert "Hello World" in all_text
+    assert "[[AI_GENERATED_PAGE]]" in all_text
+
+    # Empty document returns empty string
+    empty_doc = PDFDocument()
+    assert empty_doc.get_all_text() == ""
+
+
 def test_is_ai_generated(dummy_pdf):
     doc = PDFDocument(dummy_pdf)
     assert doc.is_ai_generated(0) == False
@@ -108,3 +119,58 @@ def test_dirty_state_and_freetext_movement(dummy_pdf):
     success, _ = doc.save_document()
     assert success
     assert not doc.is_dirty
+
+def test_get_page_image_zoom_capping(dummy_pdf):
+    doc = PDFDocument(dummy_pdf)
+    assert doc.get_page_image(-1) is None
+    assert doc.get_page_image(999) is None
+
+    # Normal zoom (1.0) with dpi_scale 2.0 -> pixel dimensions 500 * 2 = 1000
+    img_normal = doc.get_page_image(0, zoom_factor=1.0, dpi_scale=2.0)
+    assert img_normal is not None
+    assert img_normal.devicePixelRatio() == 2.0
+    # In Qt, image.width() on QImage returns physical pixel width
+    assert img_normal.width() == 1000
+    assert img_normal.height() == 1000
+
+    # High zoom (10.0) with max_zoom=3.0 and dpi_scale 2.0
+    # Effective zoom capped at 3.0 -> actual_zoom = 3.0 * 2.0 = 6.0 -> 500 * 6 = 3000 pixels
+    # (Without capping, 10.0 * 2.0 = 20.0 -> 10,000 pixels)
+    img_capped = doc.get_page_image(0, zoom_factor=10.0, dpi_scale=2.0, max_zoom=3.0)
+    assert img_capped is not None
+    assert img_capped.width() == 3000
+    assert img_capped.height() == 3000
+
+def test_get_page_image_clipped(dummy_pdf):
+    doc = PDFDocument(dummy_pdf)
+    # Page size is 500x500. Request a 100x150 clip rect at zoom 4.0, dpi_scale 2.0
+    clip = (50.0, 50.0, 150.0, 200.0)  # width=100, height=150
+    img = doc.get_page_image(0, zoom_factor=4.0, dpi_scale=2.0, clip_rect=clip)
+    assert img is not None
+    # Physical pixels: 100 * 4.0 * 2.0 = 800 width, 150 * 4.0 * 2.0 = 1200 height
+    assert img.width() == 800
+    assert img.height() == 1200
+    assert img.devicePixelRatio() == 2.0
+
+    # Out of bounds clip returns None
+    assert doc.get_page_image(0, clip_rect=(600, 600, 700, 700)) is None
+
+def test_get_page_words_and_cache(dummy_pdf):
+    doc = PDFDocument(dummy_pdf)
+    words1 = doc.get_page_words(0)
+    assert len(words1) > 0
+    assert 0 in doc._words_cache
+    # Second call returns identical cached list
+    words2 = doc.get_page_words(0)
+    assert words1 is words2
+
+    # Invalidate single page cache
+    doc.invalidate_cache(0)
+    assert 0 not in doc._words_cache
+
+    # Verify get_text_range_rects works with cached words
+    words = doc.get_page_words(0)
+    text, rects = doc.get_text_range_rects(0, (40, 40), (100, 60), words=words)
+    assert "Hello" in text
+
+

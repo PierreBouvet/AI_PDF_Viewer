@@ -8,23 +8,29 @@ def clean_settings():
     settings = QSettings("AIPDFViewer_Test", "Settings_Test")
     settings.clear()
     
-    # Temporarily override the QSettings object in the singleton
-    # Note: Because it's a singleton, we have to force re-init or patch its settings
-    ConfigManager._instance = None
+    # Reset singleton and temporarily override the QSettings object
+    ConfigManager.reset()
     config = ConfigManager()
     config.settings = settings
     
     yield config
     
     settings.clear()
+    ConfigManager.reset()
 
 def test_singleton_instance(clean_settings):
     config1 = ConfigManager()
     config2 = ConfigManager()
     assert config1 is config2
 
+def test_singleton_reset():
+    config1 = ConfigManager()
+    ConfigManager.reset()
+    config2 = ConfigManager()
+    assert config1 is not config2
+
 def test_model_name_default(clean_settings):
-    assert clean_settings.model_name == "gemini-3.5-flash-lite"
+    assert clean_settings.model_name == ""
 
 def test_model_name_setter(clean_settings):
     clean_settings.model_name = "gemini-2.5-pro"

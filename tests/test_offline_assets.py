@@ -36,3 +36,10 @@ def test_chat_html_template_has_local_scripts():
     assert 'src="tex-mml-chtml.js"' in html
     assert "Content-Security-Policy" in html
     assert "DOMPurify.sanitize" in html
+    
+    # CSP hardening checks
+    assert "default-src 'self'" in html
+    assert "script-src 'self' 'unsafe-eval' 'nonce-" in html
+    assert "'unsafe-inline'" not in html.split("script-src")[1].split(";")[0]
+    assert 'integrity="sha384-Wuix6BuhrWbjDBs24bXrjf4ZQ5aFeFWBuKkFekO2t8xFU0iNaLQfp2K6/1Nxveei"' in html
+    assert 'crossorigin="anonymous"' in html

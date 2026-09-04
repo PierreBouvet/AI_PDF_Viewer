@@ -100,42 +100,49 @@ def test_add_freetext_annotation(sample_pdf):
     assert any(a.type[1] == "FreeText" for a in annots)
 
 
-def test_floating_annotation_bar_cycle(qtbot):
+def test_floating_annotation_bar_buttons(qtbot):
     bar = FloatingAnnotationBar()
     qtbot.addWidget(bar)
     
     assert bar.active_tool == AnnotationTool.NONE
-    assert bar.highlight_state == 0
+    assert not bar.btn_hl_text.is_active
+    assert not bar.btn_hl_freehand.is_active
     
-    # 1st Click on Highlight: Text recognition
-    bar.btn_highlight.click()
+    # 1. Click on Highlight Text
+    bar.btn_hl_text.click()
     assert bar.active_tool == AnnotationTool.HIGHLIGHT_TEXT
-    assert bar.highlight_state == 1
-    assert bar.btn_highlight.is_active
+    assert bar.btn_hl_text.is_active
+    assert not bar.btn_hl_freehand.is_active
     
-    # 2nd Click on Highlight: Freehand
-    bar.btn_highlight.click()
-    assert bar.active_tool == AnnotationTool.HIGHLIGHT_FREEHAND
-    assert bar.highlight_state == 2
-    assert bar.btn_highlight.is_active
-    
-    # 3rd Click on Highlight: Inactive
-    bar.btn_highlight.click()
+    # Toggle off Highlight Text
+    bar.btn_hl_text.click()
     assert bar.active_tool == AnnotationTool.NONE
-    assert bar.highlight_state == 0
-    assert not bar.btn_highlight.is_active
+    assert not bar.btn_hl_text.is_active
     
-    # Text tool toggle
+    # 2. Click on Highlight Freehand
+    bar.btn_hl_freehand.click()
+    assert bar.active_tool == AnnotationTool.HIGHLIGHT_FREEHAND
+    assert bar.btn_hl_freehand.is_active
+    assert not bar.btn_hl_text.is_active
+    
+    # Switch directly to Text Box
     bar.btn_text.click()
     assert bar.active_tool == AnnotationTool.TEXT_BOX
+    assert bar.btn_text.is_active
+    assert not bar.btn_hl_freehand.is_active
+    
+    # Toggle off Text Box
     bar.btn_text.click()
     assert bar.active_tool == AnnotationTool.NONE
+    assert not bar.btn_text.is_active
     
     # Note tool toggle
     bar.btn_note.click()
     assert bar.active_tool == AnnotationTool.NOTE
+    assert bar.btn_note.is_active
     bar.btn_note.click()
     assert bar.active_tool == AnnotationTool.NONE
+    assert not bar.btn_note.is_active
 
 
 def test_annotation_query_edit_move_delete(sample_pdf):
@@ -170,3 +177,13 @@ def test_annotation_query_edit_move_delete(sample_pdf):
     # 5. Delete annotation
     assert sample_pdf.delete_annotation(0, note_annot)
     assert sample_pdf.get_annotation_at_point(0, 130, 140) is None
+
+
+def test_pdf_view_annotation_signals(qtbot):
+    from ui.pdf_view import PDFView
+    view = PDFView()
+    qtbot.addWidget(view)
+    
+    with qtbot.waitSignal(view.annotation_changed, timeout=1000) as blocker:
+        view.annotation_changed.emit(0)
+    assert blocker.args == [0]

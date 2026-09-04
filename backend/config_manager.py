@@ -3,6 +3,11 @@ from PySide6.QtCore import QSettings
 class ConfigManager:
     _instance = None
 
+    @classmethod
+    def reset(cls):
+        """Reset the singleton instance (primarily for testing and context teardown)."""
+        cls._instance = None
+
     def __new__(cls):
         if cls._instance is None:
             cls._instance = super(ConfigManager, cls).__new__(cls)
@@ -14,7 +19,7 @@ class ConfigManager:
 
     @property
     def model_name(self) -> str:
-        return str(self.settings.value("model_name", "gemini-3.5-flash-lite"))
+        return str(self.settings.value("model_name", ""))
 
     @model_name.setter
     def model_name(self, value: str):

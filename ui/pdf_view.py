@@ -6,6 +6,7 @@ from PySide6.QtWidgets import (
 from PySide6.QtGui import QPixmap, QImage, QPainter, QColor, QPen, QBrush, QPainterPath
 from PySide6.QtCore import Qt, Signal, QRectF, QObject, QRunnable, QThreadPool, QTimer
 from backend.pdf_document import PDFDocument
+from backend.logger import logger
 from ui.annotation_toolbar import AnnotationTool, FloatingAnnotationBar
 
 
@@ -188,13 +189,45 @@ class PageLoaderRunnable(QRunnable):
         self.signals.finished.emit(self.page_number, image, self.zoom, self.page_item)
 
 
+class TileLoaderSignals(QObject):
+    finished = Signal(int, object, float, object, object)  # page_number, QImage, zoom, clip_rect, page_item
+
+
+class TileLoaderRunnable(QRunnable):
+    def __init__(self, document, page_number, zoom, dpi_scale, clip_rect, page_item):
+        super().__init__()
+        self.document = document
+        self.page_number = page_number
+        self.zoom = zoom
+        self.dpi_scale = dpi_scale
+        self.clip_rect = clip_rect  # (x0, y0, x1, y1) in page points
+        self.page_item = page_item
+        self.signals = TileLoaderSignals()
+        
+    def run(self):
+        if not self.document:
+            return
+        image = self.document.get_page_image(
+            self.page_number, 
+            zoom_factor=self.zoom, 
+            dpi_scale=self.dpi_scale, 
+            clip_rect=self.clip_rect
+        )
+        self.signals.finished.emit(self.page_number, image, self.zoom, self.clip_rect, self.page_item)
+
+
 class PageItem(QGraphicsRectItem):
     def __init__(self, page_number: int, view: 'PDFView', parent=None):
         super().__init__(parent)
         self.page_number = page_number
         self.view = view
         self.is_loaded = False
-        self.pixmap_item = None
+        self.pixmap_item = None        # Base full-page overview layer (Z=0.0)
+        self.tile_item = None          # High-res viewport tile layer (Z=0.5)
+        self.is_tile_loading = False
+        self.current_tile_rect = None  # (x0, y0, x1, y1)
+        self.current_tile_zoom = 0.0
+        self.pending_tile_req = None
         
         self.setPen(QPen(Qt.GlobalColor.black, 1))
         self.setBrush(QColor(255, 255, 255))
@@ -205,10 +238,11 @@ class PageItem(QGraphicsRectItem):
             
         self.is_loading = True
         dpi_scale = self.view.devicePixelRatioF()
-        zoom = self.view.transform().m11()
+        # Keep base overview fast and lightweight (~8 MB per page)
+        base_zoom = min(self.view.transform().m11(), 1.5)
         
-        runnable = PageLoaderRunnable(self.view.document, self.page_number, zoom, dpi_scale, self)
-        runnable.signals.finished.connect(self.view.on_page_image_loaded)
+        runnable = PageLoaderRunnable(self.view.document, self.page_number, base_zoom, dpi_scale, self)
+        runnable.signals.finished.connect(self.view.on_page_image_loaded, Qt.ConnectionType.QueuedConnection)
         QThreadPool.globalInstance().start(runnable)
         
     def on_image_loaded(self, page_number, image, zoom):
@@ -220,12 +254,103 @@ class PageItem(QGraphicsRectItem):
                 if self.pixmap_item and self.pixmap_item.scene():
                     self.scene().removeItem(self.pixmap_item)
                 self.pixmap_item = QGraphicsPixmapItem(pixmap, self)
-                self.pixmap_item.setScale(1.0 / zoom)
+                self.pixmap_item.setTransformationMode(Qt.TransformationMode.SmoothTransformation)
+                self.pixmap_item.setZValue(0.0)
+                item_w = self.pixmap_item.boundingRect().width()
+                if self.rect().width() > 0 and item_w > 0:
+                    self.pixmap_item.setScale(self.rect().width() / item_w)
+                else:
+                    self.pixmap_item.setScale(1.0 / zoom)
                 self.is_loaded = True
         self.is_loading = False
             
+    def reload(self):
+        if getattr(self, "is_loading", False):
+            return
+            
+        self.is_loading = True
+        dpi_scale = self.view.devicePixelRatioF()
+        base_zoom = min(self.view.transform().m11(), 1.5)
+        
+        runnable = PageLoaderRunnable(self.view.document, self.page_number, base_zoom, dpi_scale, self)
+        runnable.signals.finished.connect(self.view.on_page_image_loaded, Qt.ConnectionType.QueuedConnection)
+        QThreadPool.globalInstance().start(runnable)
+
+    def update_tile(self, clip_rect: tuple, zoom: float, dpi_scale: float):
+        if not self.view.document:
+            return
+            
+        x0, y0, x1, y1 = clip_rect
+        if x1 <= x0 or y1 <= y0:
+            self.clear_tile()
+            return
+            
+        # If current tile already covers clip_rect at the same zoom level (within tolerance), keep it
+        if self.tile_item is not None and abs(self.current_tile_zoom - zoom) < 0.05:
+            if self.current_tile_rect is not None:
+                tx0, ty0, tx1, ty1 = self.current_tile_rect
+                if tx0 <= x0 + 2 and ty0 <= y0 + 2 and tx1 >= x1 - 2 and ty1 >= y1 - 2:
+                    return
+                    
+        if self.is_tile_loading:
+            self.pending_tile_req = (clip_rect, zoom, dpi_scale)
+            return
+            
+        self.is_tile_loading = True
+        runnable = TileLoaderRunnable(self.view.document, self.page_number, zoom, dpi_scale, clip_rect, self)
+        runnable.signals.finished.connect(self.view.on_page_tile_loaded, Qt.ConnectionType.QueuedConnection)
+        QThreadPool.globalInstance().start(runnable)
+
+    def on_tile_loaded(self, page_number, image, zoom, clip_rect):
+        self.is_tile_loading = False
+        if page_number != self.page_number:
+            return
+            
+        current_zoom = self.view.transform().m11()
+        if abs(current_zoom - zoom) > 0.1:
+            # Stale zoom; dispatch pending tile request if present
+            if self.pending_tile_req:
+                req = self.pending_tile_req
+                self.pending_tile_req = None
+                self.update_tile(*req)
+            return
+            
+        if image:
+            pixmap = QPixmap.fromImage(image)
+            new_tile = QGraphicsPixmapItem(pixmap, self)
+            new_tile.setTransformationMode(Qt.TransformationMode.SmoothTransformation)
+            new_tile.setZValue(0.5)  # Above base layer (0.0), below annotations
+            
+            clip_w = clip_rect[2] - clip_rect[0]
+            item_w = new_tile.boundingRect().width()
+            if clip_w > 0 and item_w > 0:
+                new_tile.setScale(clip_w / item_w)
+            new_tile.setPos(clip_rect[0], clip_rect[1])
+            
+            if self.tile_item and self.tile_item.scene():
+                self.scene().removeItem(self.tile_item)
+            self.tile_item = new_tile
+            self.current_tile_rect = clip_rect
+            self.current_tile_zoom = zoom
+            
+        if self.pending_tile_req:
+            req = self.pending_tile_req
+            self.pending_tile_req = None
+            self.update_tile(*req)
+
+    def clear_tile(self):
+        self.is_tile_loading = False
+        self.pending_tile_req = None
+        if self.tile_item:
+            if self.scene():
+                self.scene().removeItem(self.tile_item)
+            self.tile_item = None
+        self.current_tile_rect = None
+        self.current_tile_zoom = 0.0
+            
     def unload(self):
         self.is_loading = False
+        self.clear_tile()
         if not self.is_loaded:
             return
             
@@ -241,6 +366,7 @@ class PDFView(QGraphicsView):
     page_changed = Signal(int)
     text_action_requested = Signal(str, str) # action_type, text
     annotation_completed = Signal()
+    annotation_changed = Signal(int) # page_index
 
     def __init__(self, parent=None):
         super().__init__(parent)
@@ -288,6 +414,10 @@ class PDFView(QGraphicsView):
         self.reload_timer = QTimer(self)
         self.reload_timer.setSingleShot(True)
         self.reload_timer.timeout.connect(self._reload_visible)
+        
+        self.tile_timer = QTimer(self)
+        self.tile_timer.setSingleShot(True)
+        self.tile_timer.timeout.connect(self.update_viewport_tiles)
 
     def update_annotation_bar_pos(self):
         if hasattr(self, "annotation_bar") and self.annotation_bar:
@@ -347,6 +477,43 @@ class PDFView(QGraphicsView):
         import shiboken6
         if shiboken6.isValid(page_item):
             page_item.on_image_loaded(page_number, image, zoom)
+
+    def on_page_tile_loaded(self, page_number, image, zoom, clip_rect, page_item):
+        import shiboken6
+        if shiboken6.isValid(page_item):
+            page_item.on_tile_loaded(page_number, image, zoom, clip_rect)
+
+    def update_viewport_tiles(self):
+        if not self.document or not self.page_items:
+            return
+            
+        zoom = self.transform().m11()
+        dpi_scale = self.devicePixelRatioF()
+        
+        if zoom <= 1.2:
+            for item in self.page_items:
+                item.clear_tile()
+            return
+            
+        viewport_rect = self.mapToScene(self.viewport().rect()).boundingRect()
+        
+        for item in self.page_items:
+            item_scene_rect = item.sceneBoundingRect()
+            if viewport_rect.intersects(item_scene_rect):
+                inter_scene = viewport_rect.intersected(item_scene_rect)
+                inter_item = item.mapFromScene(inter_scene).boundingRect()
+                
+                w = item.rect().width()
+                h = item.rect().height()
+                margin = 60.0
+                x0 = max(0.0, inter_item.left() - margin)
+                y0 = max(0.0, inter_item.top() - margin)
+                x1 = min(w, inter_item.right() + margin)
+                y1 = min(h, inter_item.bottom() + margin)
+                
+                item.update_tile((x0, y0, x1, y1), zoom, dpi_scale)
+            else:
+                item.clear_tile()
         
     def set_document(self, doc: PDFDocument):
         self.document = doc
@@ -355,6 +522,8 @@ class PDFView(QGraphicsView):
         self.render_document()
         
     def render_document(self):
+        if hasattr(self, "tile_timer"):
+            self.tile_timer.stop()
         self.scene.clear()
         self.selection_items.clear()
         self.page_items.clear()
@@ -439,6 +608,8 @@ class PDFView(QGraphicsView):
     def scrollContentsBy(self, dx, dy):
         super().scrollContentsBy(dx, dy)
         self.check_visibility()
+        if self.transform().m11() > 1.2:
+            self.tile_timer.start(100)
         
     def resizeEvent(self, event):
         old_size = event.oldSize()
@@ -464,21 +635,43 @@ class PDFView(QGraphicsView):
             self.set_current_page(self.current_page - 1)
             
     def _debounce_reload(self):
-        self.reload_timer.start(200)
+        self.reload_timer.start(150)
+        if self.transform().m11() > 1.2:
+            self.tile_timer.start(150)
 
     def _reload_visible(self):
+        if not self.document:
+            return
+        viewport_rect = self.mapToScene(self.viewport().rect()).boundingRect()
         for item in self.page_items:
-            if item.is_loaded:
-                item.unload()
-        self.check_visibility()
+            item_rect = item.sceneBoundingRect()
+            if viewport_rect.intersects(item_rect):
+                if item.is_loaded:
+                    item.reload()
+                else:
+                    item.load()
+            else:
+                distance = min(abs(viewport_rect.bottom() - item_rect.top()), 
+                               abs(item_rect.bottom() - viewport_rect.top()))
+                if distance > 2000:
+                    item.unload()
+        if self.transform().m11() > 1.2:
+            self.update_viewport_tiles()
 
     def zoom_in(self):
         self.scale(1.2, 1.2)
         self._reload_visible()
+        if self.transform().m11() > 1.2:
+            self.tile_timer.start(100)
         
     def zoom_out(self):
         self.scale(1 / 1.2, 1 / 1.2)
         self._reload_visible()
+        if self.transform().m11() > 1.2:
+            self.tile_timer.start(100)
+        else:
+            for item in self.page_items:
+                item.clear_tile()
         
     def viewportEvent(self, event):
         if event.type() == event.Type.NativeGesture:
@@ -522,6 +715,7 @@ class PDFView(QGraphicsView):
                     self.document.save_document()
                     item.unload()
                     item.load()
+                    self.annotation_changed.emit(item.page_number)
                     self.annotation_completed.emit()
             return
 
@@ -541,13 +735,14 @@ class PDFView(QGraphicsView):
                 self.scene.addItem(self._freehand_path_item)
             return
 
-        # 3. Highlight Text Recognition Tool (Standard PDF Text Selection)
+        # 3. Highlight Text Tool
         if self.tool_mode == AnnotationTool.HIGHLIGHT_TEXT:
             item = self._find_page_item_at_scene_pos(scene_pos)
             if item and self.document:
                 self._hl_start_scene = scene_pos
                 self._hl_item = item
                 self._hl_preview_items = []
+                self._hl_cached_words = self.document.get_page_words(item.page_number)
             return
 
         # 4. Text Box Tool
@@ -574,28 +769,7 @@ class PDFView(QGraphicsView):
                     self._moving_global_pos = event.globalPos()
                     return
 
-        # 6. Standard Text Selection Check
-        clicked_on_selection = False
-        for item in self.selection_items:
-            if item.contains(item.mapFromScene(scene_pos)):
-                clicked_on_selection = True
-                break
-                
-        if clicked_on_selection and self.current_selected_text and self.tool_mode == AnnotationTool.NONE:
-            menu = QMenu(self)
-            explain_action = menu.addAction("Explain")
-            discuss_action = menu.addAction("Discuss")
-            summary_action = menu.addAction("Bullet summary")
-            
-            action = menu.exec_(event.globalPos())
-            if action == explain_action:
-                self.text_action_requested.emit("explain", self.current_selected_text)
-            elif action == discuss_action:
-                self.text_action_requested.emit("discuss", self.current_selected_text)
-            elif action == summary_action:
-                self.text_action_requested.emit("summary", self.current_selected_text)
-            return
-            
+        # 6. Standard Text Selection Clear
         modifiers = QApplication.keyboardModifiers()
         shift_held = bool(modifiers & Qt.KeyboardModifier.ShiftModifier)
         
@@ -651,7 +825,8 @@ class PDFView(QGraphicsView):
             item = self._hl_item
             p0 = (self._hl_start_scene.x() - item.sceneBoundingRect().x(), self._hl_start_scene.y() - item.sceneBoundingRect().y())
             p1 = (scene_pos.x() - item.sceneBoundingRect().x(), scene_pos.y() - item.sceneBoundingRect().y())
-            _, line_rects = self.document.get_text_range_rects(item.page_number, p0, p1)
+            cached_words = getattr(self, "_hl_cached_words", None)
+            _, line_rects = self.document.get_text_range_rects(item.page_number, p0, p1, words=cached_words)
             
             for it in getattr(self, "_hl_preview_items", []):
                 if it.scene():
@@ -693,6 +868,7 @@ class PDFView(QGraphicsView):
                 self.document.move_annotation(item.page_number, annot, dx, dy)
                 item.unload()
                 item.load()
+                self.annotation_changed.emit(item.page_number)
                 return
             else:
                 annot_type = annot.type[1]
@@ -712,6 +888,7 @@ class PDFView(QGraphicsView):
                                 self.document.update_annotation_text(item.page_number, annot, dlg.get_text())
                                 item.unload()
                                 item.load()
+                                self.annotation_changed.emit(item.page_number)
                         else:
                             dlg = TextBoxDialog(initial_text=current_content, parent=self)
                             dlg.move(global_click_pos)
@@ -719,18 +896,39 @@ class PDFView(QGraphicsView):
                                 self.document.update_annotation_text(item.page_number, annot, dlg.get_text())
                                 item.unload()
                                 item.load()
+                                self.annotation_changed.emit(item.page_number)
                     elif selected_act == delete_action:
                         self.document.delete_annotation(item.page_number, annot)
                         item.unload()
                         item.load()
+                        self.annotation_changed.emit(item.page_number)
                     return
                 elif annot_type in ("Highlight", "Ink"):
+                    annot_text = self.document.get_annotation_text(item.page_number, annot)
+                    explain_act = None
+                    discuss_act = None
+                    summary_act = None
+                    
+                    if annot_text:
+                        explain_act = menu.addAction("Explain")
+                        discuss_act = menu.addAction("Discuss")
+                        summary_act = menu.addAction("Bullet summary")
+                        menu.addSeparator()
+                        
                     delete_action = menu.addAction("Delete")
                     selected_act = menu.exec_(global_click_pos)
+                    
                     if selected_act == delete_action:
                         self.document.delete_annotation(item.page_number, annot)
                         item.unload()
                         item.load()
+                        self.annotation_changed.emit(item.page_number)
+                    elif selected_act == explain_act:
+                        self.text_action_requested.emit("explain", annot_text)
+                    elif selected_act == discuss_act:
+                        self.text_action_requested.emit("discuss", annot_text)
+                    elif selected_act == summary_act:
+                        self.text_action_requested.emit("summary", annot_text)
                     return
         
         # 1. Freehand Highlight Release
@@ -745,6 +943,8 @@ class PDFView(QGraphicsView):
                 self.document.save_document()
                 item.unload()
                 item.load()
+                self.annotation_changed.emit(item.page_number)
+                self.annotation_completed.emit()
                 
             self._freehand_item = None
             self._freehand_stroke = []
@@ -769,6 +969,7 @@ class PDFView(QGraphicsView):
                 self.document.save_document()
                 item.unload()
                 item.load()
+                self.annotation_changed.emit(item.page_number)
                 self.annotation_completed.emit()
                 
             self._textbox_item = None
@@ -787,15 +988,19 @@ class PDFView(QGraphicsView):
             self._hl_preview_items = []
             
             if (abs(p1[0] - p0[0]) > 3 or abs(p1[1] - p0[1]) > 3) and self.document:
-                _, line_rects = self.document.get_text_range_rects(item.page_number, p0, p1)
+                cached_words = getattr(self, "_hl_cached_words", None)
+                _, line_rects = self.document.get_text_range_rects(item.page_number, p0, p1, words=cached_words)
                 if line_rects:
                     self.document.add_highlight_annotation(item.page_number, line_rects)
                     self.document.save_document()
                     item.unload()
                     item.load()
+                    self.annotation_changed.emit(item.page_number)
+                    self.annotation_completed.emit()
                     
             self._hl_item = None
             self._hl_start_scene = None
+            self._hl_cached_words = None
             return
 
         # 4. Standard Rubber Band Selection
@@ -848,7 +1053,7 @@ class PDFView(QGraphicsView):
                         self.current_selected_text = word
                         
                     QApplication.clipboard().setText(self.current_selected_text)
-                    print(f"Copied word to clipboard: {self.current_selected_text}")
+                    logger.debug(f"Copied word to clipboard: {self.current_selected_text}")
                 break
                 
         super().mouseDoubleClickEvent(event)
@@ -895,4 +1100,4 @@ class PDFView(QGraphicsView):
                 
             self.current_selected_text = final_text
             QApplication.clipboard().setText(final_text)
-            print(f"Copied text to clipboard: {final_text[:50]}...")
+            logger.debug(f"Copied text to clipboard: {final_text[:50]}...")
