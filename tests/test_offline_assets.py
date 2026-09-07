@@ -9,10 +9,12 @@ def test_assets_exist():
     marked_path = get_asset_path("marked.min.js")
     purify_path = get_asset_path("purify.min.js")
     mathjax_path = get_asset_path("tex-mml-chtml.js")
+    qwebchannel_path = get_asset_path("qwebchannel.js")
     
     assert os.path.exists(marked_path)
     assert os.path.exists(purify_path)
     assert os.path.exists(mathjax_path)
+    assert os.path.exists(qwebchannel_path)
 
 def test_read_asset_text():
     content = read_asset_text("marked.min.js")
@@ -31,6 +33,7 @@ def test_chat_html_template_has_local_scripts():
     
     # Should use local script references, not external CDNs
     assert "cdn.jsdelivr.net" not in html
+    assert 'src="qwebchannel.js"' in html
     assert 'src="marked.min.js"' in html
     assert 'src="purify.min.js"' in html
     assert 'src="tex-mml-chtml.js"' in html

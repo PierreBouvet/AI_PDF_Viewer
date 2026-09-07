@@ -45,24 +45,119 @@ python main.py
 ```
 
 ### Getting Started:
-1. **Configure API Key**: Click on the **"AI configuration"** button in the toolbar. Enter your Gemini API key and select your preferred model. Your API key will be saved securely to your system keychain.
+1. **Configure AI Provider**: Click on the **"AI configuration"** button (`⚙️`) in the toolbar.
+   - **Cloud**: Select **Cloud (Google Gemini)**, enter your Gemini API key, and choose your preferred model.
+   - **Local (Offline)**: Select **Local Model (Mistral / GGUF)** to connect to a local runner like **Ollama** or pick a local model file.
 2. **Open a PDF**: Drag and drop a PDF into the main window or click **"Open PDF"**.
 3. **Index the Document**: Once loaded, click the blue **"Index PDF to enable AI Q&A"** button in the chat panel. This prepares the document for the AI.
-4. **Chat**: Type a question in the chat box or use the dropdown to select a pre-defined prompt!
+4. **Chat**: Type a question in the chat box, select a pre-defined prompt from the dropdown, or right-click / select text to explain and discuss passages!
+
+---
+
+## Running Models Locally with Ollama
+
+Running a local model ensures **100% privacy**, eliminates **503 service unavailable / rate-limit errors**, and allows the app to function completely **offline**.
+
+### 1. Install Ollama
+
+- **macOS**:
+  ```bash
+  # Using Homebrew
+  brew install ollama
+  # Or download directly from https://ollama.com/download
+  ```
+- **Linux**:
+  ```bash
+  curl -fsSL https://ollama.com/install.sh | sh
+  ```
+- **Windows**:
+  Download and install the official installer from [ollama.com/download](https://ollama.com/download).
+
+Start the Ollama background service if it is not already running:
+```bash
+ollama serve
+```
+
+---
+
+### 2. Download & Run Recommended Models
+
+#### **Mistral NeMo 12B (Highly Recommended)**
+Created jointly by Mistral AI and NVIDIA, **Mistral NeMo 12B** is an exceptional choice for scientific research papers, technical documents, and complex reasoning. It features a native **128k context window** and runs smoothly on Apple Silicon (M1/M2/M3/M4) and modern GPUs.
+
+```bash
+# Pull and start Mistral NeMo (approx. 7.1 GB)
+ollama pull mistral-nemo:12b
+```
+
+#### Other Excellent Local Models:
+| Model | Command | Context Window | Best For |
+|---|---|---|---|
+| **Mistral NeMo 12B** | `ollama pull mistral-nemo:12b` | 128k tokens | **Research papers, reasoning, math** (Recommended) |
+| **Llama 3.1 8B** | `ollama pull llama3.1:8b` | 128k tokens | General document Q&A and fast summarization |
+| **Qwen 2.5 7B / 14B** | `ollama pull qwen2.5:7b` | 128k tokens | Multilingual texts, tables, and structured data |
+| **Phi-3.5 Mini 3.8B** | `ollama pull phi3.5` | 128k tokens | Lightweight machines and laptops |
+
+---
+
+### 3. Setting a Large Context Window in Ollama (For Long PDFs)
+
+By default, Ollama allocates a 2,048 or 4,096 token context window unless configured otherwise. To enable large document analysis across 30+ pages, create a custom model preset with a larger context:
+
+1. Create a file named `Modelfile`:
+   ```dockerfile
+   FROM mistral-nemo:12b
+   PARAMETER num_ctx 32768
+   PARAMETER temperature 0.3
+   ```
+2. Build the model in Ollama:
+   ```bash
+   ollama create mistral-nemo-32k -f Modelfile
+   ```
+
+---
+
+### 4. Running Custom GGUF Model Files
+
+If you downloaded a `.gguf` model file directly (e.g. from Hugging Face), you can import it into Ollama:
+
+1. Create a `Modelfile`:
+   ```dockerfile
+   FROM /path/to/your/model.gguf
+   PARAMETER num_ctx 32768
+   PARAMETER temperature 0.3
+   ```
+2. Build the model in Ollama:
+   ```bash
+   ollama create my-custom-model -f Modelfile
+   ```
+
+---
+
+### 5. Configure AI PDF Viewer to Use Ollama
+
+1. Open AI PDF Viewer and click **Settings** (`Cmd+,` or toolbar button) > **AI** tab.
+2. Select **Local (Ollama / Local LLM)**.
+3. The app automatically detects installed models from Ollama; choose your model (e.g., `mistral-nemo:latest`) from the dropdown.
+4. Click **"Save Settings"** (`OK`).
+5. Open your PDF and click **"Index PDF"** to analyze documents with your local Ollama model!
+
+---
 
 ## Project Structure
 
 - `main.py`: The entry point for the application.
-- `backend/`: Core logic including the `AIAssistant` (Gemini API interactions), `PDFDocument` (PyMuPDF wrapper), `ConfigManager`, and `PromptsManager`.
+- `backend/`: Core logic including `AIAssistant` (Gemini & Local LLM integration), `PDFDocument` (PyMuPDF wrapper), `ConfigManager`, and `PromptsManager`.
 - `ui/`: PySide6 interface components (`MainWindow`, `PDFView`, `AIChatPanel`, `ThumbnailPanel`, dialogs, etc.).
-- `icons/`: Project assets and icons.
+- `assets/`: Offline assets (`qwebchannel.js`, `marked.min.js`, `purify.min.js`, `tex-mml-chtml.js`).
+- `icons/`: High-DPI and vector application icons.
 - `custom_prompts.csv`: User-defined prompt library.
 
 ## Technologies Used
 
 - **GUI Framework**: PySide6 (Qt for Python)
 - **PDF Rendering**: PyMuPDF (`pymupdf`)
-- **AI Integration**: Google GenAI SDK (`google-genai`)
-- **Web Rendering**: QtWebEngine
-- **Theming**: qt-material
+- **AI Integration**: Google GenAI SDK (`google-genai`) & Local OpenAI-compatible API (Ollama, LM Studio)
+- **Web Rendering**: QtWebEngine & QWebChannel
 - **Security**: keyring (for secure credential storage)
+

@@ -1,4 +1,6 @@
 import os
+import shutil
+import tempfile
 import keyring
 from PySide6.QtWidgets import (QMainWindow, QSplitter, QSplitterHandle, QFileDialog, 
                                QToolBar, QMessageBox, QGraphicsView, QPushButton)
@@ -14,8 +16,60 @@ from backend.pdf_document import PDFDocument
 from backend.ai_assistant import AIAssistant
 from backend.prompts_manager import PromptsManager
 from ui.prompts_dialog import PromptsDialog
-from backend.config_manager import ConfigManager
+from backend.config_manager import ConfigManager, DEFAULT_FALLBACK_MODEL
 from backend.logger import logger
+
+class BackgroundSaveWorker(QThread):
+    save_finished = Signal(bool, str, int)  # success, err_msg, version
+    
+    def __init__(self, file_path: str, doc_bytes: bytes, version: int):
+        super().__init__()
+        self.file_path = file_path
+        self.doc_bytes = doc_bytes
+        self.version = version
+        
+    def run(self):
+        if not self.file_path or not self.doc_bytes:
+            self.save_finished.emit(False, "Invalid file path or data", self.version)
+            return
+            
+        backup_path = self.file_path + ".backup"
+        temp_file = None
+        try:
+            # 1. Create .backup file
+            if os.path.exists(self.file_path):
+                shutil.copy2(self.file_path, backup_path)
+                
+            # 2. Save whole document to temp file
+            dir_name = os.path.dirname(self.file_path) or None
+            fd, temp_file = tempfile.mkstemp(suffix=".pdf", dir=dir_name)
+            with open(temp_file, "wb") as f:
+                f.write(self.doc_bytes)
+            os.close(fd)
+            
+            # 3. Move to original location
+            shutil.move(temp_file, self.file_path)
+            temp_file = None
+            
+            # 4. Delete backup on success
+            if os.path.exists(backup_path):
+                os.remove(backup_path)
+                
+            self.save_finished.emit(True, "", self.version)
+        except Exception as e:
+            logger.error(f"Background save error: {e}")
+            if os.path.exists(backup_path):
+                try:
+                    shutil.move(backup_path, self.file_path)
+                except Exception:
+                    pass
+            self.save_finished.emit(False, str(e), self.version)
+        finally:
+            if temp_file and os.path.exists(temp_file):
+                try:
+                    os.remove(temp_file)
+                except Exception:
+                    pass
 
 class MainSplitterHandle(QSplitterHandle):
     def __init__(self, orientation, parent):
@@ -278,10 +332,11 @@ class MainWindow(QMainWindow):
         self.ai_font_size = self.config.ai_font_size
         
         # Initialize Backend
-        from main import DEFAULT_FALLBACK_MODEL
         self.pdf_doc = PDFDocument()
         self.ai_assistant = AIAssistant(model_name=saved_model_name or DEFAULT_FALLBACK_MODEL)
         self.prompts_manager = PromptsManager()
+        self._save_worker = None
+        self._pending_save = None
         
         self.startup_thread = None
         if keyring.get_password("AIPDFViewer", "api_key"):
@@ -333,7 +388,8 @@ class MainWindow(QMainWindow):
         ph_layout.setAlignment(Qt.AlignmentFlag.AlignCenter)
         
         icon_label = QLabel()
-        icon_pixmap = QPixmap("icons/full_size.jpg")
+        from ui.asset_loader import get_icon_path
+        icon_pixmap = QPixmap(get_icon_path("full_size.jpg"))
         if not icon_pixmap.isNull():
             icon_label.setPixmap(icon_pixmap.scaled(200, 200, Qt.AspectRatioMode.KeepAspectRatio, Qt.TransformationMode.SmoothTransformation))
         
@@ -383,6 +439,7 @@ class MainWindow(QMainWindow):
         self.save_btn = QPushButton("Save")
         self.save_btn.setToolTip("Save PDF annotations (Cmd+S / Ctrl+S)")
         self.save_btn.clicked.connect(self.save_current_document)
+        self.save_btn.setEnabled(False)
         self.toolbar.addWidget(self.save_btn)
         
         from PySide6.QtGui import QKeySequence, QShortcut
@@ -423,9 +480,10 @@ class MainWindow(QMainWindow):
         self.thumbnail_panel.delete_page_requested.connect(self.delete_page)
         self.pdf_view.page_changed.connect(self.thumbnail_panel.set_current_page)
         self.pdf_view.text_action_requested.connect(self.handle_text_action)
-        self.pdf_view.annotation_changed.connect(self.thumbnail_panel.refresh_thumbnail)
+        self.pdf_view.annotation_changed.connect(self.on_document_modified)
         self.chat_panel.open_settings_requested.connect(self.open_ai_settings)
         self.chat_panel.retry_requested.connect(self.retry_last_action)
+        self.chat_panel.stop_requested.connect(self.stop_ai_worker)
         
         self.worker = None
         self.indexer = None
@@ -456,8 +514,31 @@ class MainWindow(QMainWindow):
         except Exception:
             return False
 
+    def stop_ai_worker(self):
+        """Terminates and cleans up running AI worker on user cancellation."""
+        if self._is_thread_running(self.worker):
+            thread = self.worker
+            try:
+                thread.result_ready.disconnect()
+            except Exception:
+                pass
+            try:
+                thread.error.disconnect()
+            except Exception:
+                pass
+            self.zombie_threads.add(thread)
+            thread.finished.connect(lambda t=thread: self.zombie_threads.discard(t))
+            if thread.isRunning():
+                thread.terminate()
+            self.worker = None
+        self.last_ai_action = None
+        self.chat_panel.set_generating_state(False)
+        self.add_log("AI generation stopped by user")
+        self.statusBar().showMessage("AI generation stopped.", 3000)
+
     def _on_worker_finished(self):
         self.worker = None
+        self.chat_panel.set_generating_state(False)
 
     def showEvent(self, event):
         super().showEvent(event)
@@ -519,33 +600,21 @@ class MainWindow(QMainWindow):
         self.open_config(initial_tab=1)
 
     def open_config(self, initial_tab=0):
+        old_provider = self.config.ai_provider
         old_model = self.config.model_name
-        try:
-            import keyring
-            old_api_key = keyring.get_password("AIPDFViewer", "api_key") or ""
-        except Exception:
-            old_api_key = ""
+        old_local_endpoint = self.config.local_endpoint_url
+        old_local_name = self.config.local_model_name
         old_style = self.config.app_style
         old_mode = self.config.color_mode
         
-        dialog = ConfigDialog(self, old_api_key, initial_tab=initial_tab)
+        dialog = ConfigDialog(self, initial_tab=initial_tab)
         dialog.theme_preview_requested.connect(lambda s, m: self.update_ui_theme(preview_style=s, preview_mode=m))
         
         if dialog.exec():
+            new_provider = self.config.ai_provider
             new_model = self.config.model_name
-            new_api_key = dialog.api_key or ""
-            
-            # Save API key to Keychain
-            try:
-                if new_api_key:
-                    keyring.set_password("AIPDFViewer", "api_key", new_api_key)
-                else:
-                    try:
-                        keyring.delete_password("AIPDFViewer", "api_key")
-                    except Exception:
-                        pass
-            except Exception as e:
-                logger.error(f"Failed to save to keychain: {e}")
+            new_local_endpoint = self.config.local_endpoint_url
+            new_local_name = self.config.local_model_name
             
             # Apply appearance options (theme, font)
             self.ai_font_family = self.config.ai_font_family
@@ -553,13 +622,15 @@ class MainWindow(QMainWindow):
             self.chat_panel.update_font(self.ai_font_family, self.ai_font_size)
             self.update_ui_theme()
             
+            provider_changed = (old_provider != new_provider)
             model_changed = (old_model != new_model and bool(new_model))
-            key_changed = (old_api_key != new_api_key)
+            key_changed = getattr(dialog, "key_was_changed", False)
+            local_changed = (old_local_endpoint != new_local_endpoint or old_local_name != new_local_name)
             
             if model_changed:
                 self.ai_assistant.set_model_name(new_model)
 
-            if model_changed or key_changed:
+            if provider_changed or model_changed or key_changed or local_changed:
                 self.ai_assistant.reset_client()
                 self.chat_panel.clear_chat()
                 self.chat_panel.set_index_status("unloaded")
@@ -568,9 +639,17 @@ class MainWindow(QMainWindow):
                     self.chat_panel.add_system_message(f"Document: {os.path.basename(self.pdf_doc.file_path)}<br><br><b>Click the 'Index PDF' button below</b> to index with the updated configuration.")
                     self.chat_panel.show_index_button()
                     
-                if model_changed:
+                active_model = self.ai_assistant.get_active_model_name()
+                if provider_changed:
+                    provider_label = "Local Model" if new_provider == "local" else "Cloud (Gemini)"
+                    self.add_log(f"AI Provider switched to {provider_label} ({active_model}). Please re-index the document.")
+                    QMessageBox.information(self, "AI Provider Changed", f"AI Provider switched to {provider_label} ({active_model}).\nPlease re-index the document to continue.")
+                elif model_changed:
                     self.add_log(f"Model changed to {new_model}. Please re-index the document.")
                     QMessageBox.information(self, "Model Changed", f"AI model changed to {new_model}.\nPlease re-index the document to continue.")
+                elif local_changed and new_provider == "local":
+                    self.add_log(f"Local AI configuration updated ({active_model}). Please re-index the document.")
+                    QMessageBox.information(self, "Local AI Configuration Updated", f"Local AI model set to {active_model}.\nPlease re-index the document to continue.")
                 else:
                     self.add_log("API Key updated. Please re-index the document.")
                     QMessageBox.information(self, "API Key Updated", "API key updated successfully.\nPlease re-index the document to continue.")
@@ -676,12 +755,78 @@ class MainWindow(QMainWindow):
         if file_path:
             self.load_pdf(file_path)
 
+    def on_document_modified(self, page_number: int = -1):
+        """Called whenever an annotation is added, changed, or removed."""
+        if not self.pdf_doc or not self.pdf_doc.doc:
+            return
+            
+        if page_number >= 0:
+            self.thumbnail_panel.refresh_thumbnail(page_number)
+            
+        # 1. Mark displayed document as unsaved
+        self.pdf_doc.is_saved = False
+        self.pdf_doc.is_dirty = True
+        self.update_save_action_state()
+        
+        # 2. Extract current document bytes safely under lock
+        with self.pdf_doc._lock:
+            if not self.pdf_doc.doc or not self.pdf_doc.file_path:
+                return
+            version = self.pdf_doc._version
+            file_path = self.pdf_doc.file_path
+            try:
+                doc_bytes = self.pdf_doc.doc.tobytes(deflate=True)
+            except Exception as e:
+                logger.error(f"Error extracting document bytes for auto-save: {e}")
+                return
+                
+        # 3. Launch background process to save document
+        if self._save_worker and self._save_worker.isRunning():
+            self._pending_save = (file_path, doc_bytes, version)
+            return
+            
+        self._save_worker = BackgroundSaveWorker(file_path, doc_bytes, version)
+        self._save_worker.save_finished.connect(self._on_background_save_finished)
+        self._save_worker.start()
+
+    def _on_background_save_finished(self, success: bool, err_msg: str, version: int):
+        if success:
+            if self.pdf_doc and self.pdf_doc._version == version:
+                self.pdf_doc.is_saved = True
+                self.pdf_doc.is_dirty = False
+                self.update_save_action_state()
+                self.statusBar().showMessage("Document saved.", 2000)
+        else:
+            logger.error(f"Auto-save failed: {err_msg}")
+            
+        if hasattr(self, "_pending_save") and self._pending_save:
+            file_path, doc_bytes, ver = self._pending_save
+            self._pending_save = None
+            self._save_worker = BackgroundSaveWorker(file_path, doc_bytes, ver)
+            self._save_worker.save_finished.connect(self._on_background_save_finished)
+            self._save_worker.start()
+        else:
+            self._save_worker = None
+
+    def update_save_action_state(self):
+        """Enable Save button only if the displayed document is not saved on disk."""
+        if not self.pdf_doc or not self.pdf_doc.doc:
+            self.save_btn.setEnabled(False)
+        else:
+            self.save_btn.setEnabled(not getattr(self.pdf_doc, "is_saved", True))
+
     def save_current_document(self):
         """Save the currently open document."""
         if not self.pdf_doc or not self.pdf_doc.doc:
             return
+        if hasattr(self, "_save_worker") and self._save_worker and self._save_worker.isRunning():
+            self._save_worker.wait()
+            
         success, err = self.pdf_doc.save_document()
         if success:
+            self.pdf_doc.is_saved = True
+            self.pdf_doc.is_dirty = False
+            self.update_save_action_state()
             self.statusBar().showMessage("Document saved successfully.", 3000)
             self.add_log("Document saved")
         else:
@@ -689,7 +834,7 @@ class MainWindow(QMainWindow):
 
     def maybe_save_prompt(self) -> bool:
         """Prompts user if document has unsaved changes. Returns True if okay to proceed, False if cancelled."""
-        if not self.pdf_doc or not self.pdf_doc.doc or not getattr(self.pdf_doc, "is_dirty", False):
+        if not self.pdf_doc or not self.pdf_doc.doc or getattr(self.pdf_doc, "is_saved", True):
             return True
             
         filename = os.path.basename(self.pdf_doc.file_path) if self.pdf_doc.file_path else "Document"
@@ -700,10 +845,13 @@ class MainWindow(QMainWindow):
             QMessageBox.StandardButton.Save
         )
         if reply == QMessageBox.StandardButton.Save:
+            if hasattr(self, "_save_worker") and self._save_worker and self._save_worker.isRunning():
+                self._save_worker.wait()
             success, err = self.pdf_doc.save_document()
             if not success:
                 QMessageBox.critical(self, "Error", f"Failed to save document: {err}")
                 return False
+            self.update_save_action_state()
             return True
         elif reply == QMessageBox.StandardButton.Discard:
             return True
@@ -711,10 +859,50 @@ class MainWindow(QMainWindow):
             return False
 
     def closeEvent(self, event):
-        if self.maybe_save_prompt():
-            event.accept()
-        else:
+        if not self.maybe_save_prompt():
             event.ignore()
+            return
+            
+        # Collect all active / tracked threads for cleanup
+        all_threads = list(self.zombie_threads)
+        for attr in ("worker", "indexer", "startup_thread", "_save_worker"):
+            t = getattr(self, attr, None)
+            if t and self._is_thread_running(t):
+                all_threads.append(t)
+                
+        for thread in all_threads:
+            try:
+                # Disconnect signals to avoid callbacks during shutdown
+                for sig_name in ("result_ready", "error", "finished", "models_ranked", "save_finished"):
+                    if hasattr(thread, sig_name):
+                        try:
+                            getattr(thread, sig_name).disconnect()
+                        except Exception:
+                            pass
+                if thread.isRunning():
+                    thread.quit()
+                    if not thread.wait(3000):
+                        thread.terminate()
+                        thread.wait(500)
+            except Exception as e:
+                logger.error(f"Error during thread shutdown in closeEvent: {e}")
+                
+        self.zombie_threads.clear()
+        self.worker = None
+        self.indexer = None
+        self.startup_thread = None
+        self._save_worker = None
+
+        # Release local AI models from memory (RAM / VRAM) on shutdown
+        try:
+            from backend.ai_assistant import release_local_ai_models
+            from backend.config_manager import ConfigManager
+            cfg = ConfigManager()
+            release_local_ai_models(cfg.local_endpoint_url, cfg.local_model_name)
+        except Exception as e:
+            logger.debug(f"Failed to release local AI models on close: {e}")
+        
+        event.accept()
 
     def load_pdf(self, file_path):
         # Safely handle any running threads so they don't get destroyed mid-execution
@@ -759,7 +947,9 @@ class MainWindow(QMainWindow):
             self.open_action.setText("Load another PDF")
             self.chat_panel.show_index_button()
             self.add_log(f"PDF loaded: {os.path.basename(file_path)}")
+            self.update_save_action_state()
         else:
+            self.update_save_action_state()
             QMessageBox.critical(self, "Error", "Failed to load PDF.")
 
     def dragEnterEvent(self, event):
@@ -822,13 +1012,15 @@ class MainWindow(QMainWindow):
                     self.pdf_view.set_current_page(new_page)
                     self.thumbnail_panel.set_current_page(new_page)
                     
-                self.update_window_title()
+                self.on_document_modified()
+                self.statusBar().showMessage(f"Page {page_index + 1} deleted.", 3000)
 
     def index_current_document(self):
-        api_key = keyring.get_password("AIPDFViewer", "api_key")
-        if not api_key:
-            self.chat_panel.add_system_message("Please configure Google API Key to enable AI features.")
-            return
+        if self.ai_assistant.provider == "cloud":
+            api_key = keyring.get_password("AIPDFViewer", "api_key")
+            if not api_key:
+                self.chat_panel.add_system_message("Please configure Google API Key in Settings to enable AI features.")
+                return
             
         if self._is_thread_running(self.indexer):
             thread = self.indexer
@@ -849,10 +1041,23 @@ class MainWindow(QMainWindow):
         if self.indexer:
             self.indexer.deleteLater()
             self.indexer = None
-        if not getattr(self.ai_assistant, "chat_session", None):
+        if self.ai_assistant.provider == "cloud" and not getattr(self.ai_assistant, "chat_session", None):
             self.on_indexing_error("Indexing session could not be established.")
             return
-        model = getattr(self.ai_assistant, "model_name", "")
+        elif self.ai_assistant.provider == "local" and not getattr(self.ai_assistant, "local_document_text", None):
+            self.on_indexing_error("Document text could not be extracted.")
+            return
+            
+        model = self.ai_assistant.get_active_model_name()
+        doc_tokens = 0
+        if self.ai_assistant.provider == "local":
+            doc_tokens = len(getattr(self.ai_assistant, "local_document_text", "") or "") // 4
+        elif self.ai_assistant.provider == "cloud":
+            if self.pdf_doc and self.pdf_doc.doc:
+                doc_tokens = sum(len(page.get_text()) // 4 for page in self.pdf_doc.doc)
+            else:
+                doc_tokens = 1000
+        self.chat_panel.set_document_tokens(doc_tokens)
         self.chat_panel.set_index_status("indexed", model)
         self.add_log(f"Document indexed successfully by {model}" if model else "Document indexed successfully")
         
@@ -906,11 +1111,18 @@ class MainWindow(QMainWindow):
             
         self.chat_panel.add_user_message(prompt)
         
-        if not self.ai_assistant.uploaded_file or not getattr(self.ai_assistant, "chat_session", None):
+        has_context = (self.ai_assistant.uploaded_file and getattr(self.ai_assistant, "chat_session", None)) if self.ai_assistant.provider == "cloud" else bool(getattr(self.ai_assistant, "local_document_text", None))
+        if not has_context:
             self.chat_panel.add_system_message("Please click 'Index PDF to enable AI Q&A' below before using AI features that require document context.")
             self.chat_panel.show_index_button()
             return
             
+        if self._is_thread_running(self.worker):
+            thread = self.worker
+            self.zombie_threads.add(thread)
+            thread.finished.connect(lambda t=thread: self.zombie_threads.discard(t))
+            self.worker = None
+
         self.last_ai_action = ("worker", {
             "question": prompt,
             "action_type": action_type,
@@ -918,7 +1130,7 @@ class MainWindow(QMainWindow):
             "original_prompt": prompt,
             "display_title": display_title
         })
-        self.chat_panel.show_loading()
+        self.chat_panel.set_generating_state(True)
         self.worker = WorkerThread(self.ai_assistant, prompt, action_type, original_prompt=prompt, display_title=display_title)
         self.worker.result_ready.connect(self.on_ai_response)
         self.worker.error.connect(self.on_worker_error)
@@ -928,6 +1140,12 @@ class MainWindow(QMainWindow):
         
     def handle_chat_message(self, text: str, is_custom: bool = False, display_title: str = ""):
         self.add_log("Prompt sent to AI model")
+        if self._is_thread_running(self.worker):
+            thread = self.worker
+            self.zombie_threads.add(thread)
+            thread.finished.connect(lambda t=thread: self.zombie_threads.discard(t))
+            self.worker = None
+
         self.last_ai_action = ("worker", {
             "question": text,
             "action_type": "chat",
@@ -935,6 +1153,7 @@ class MainWindow(QMainWindow):
             "original_prompt": text,
             "display_title": display_title
         })
+        self.chat_panel.set_generating_state(True)
         if is_custom:
             self.worker = WorkerThread(self.ai_assistant, text, "chat", use_direct=True, original_prompt=text, display_title=display_title)
         else:
@@ -958,12 +1177,14 @@ class MainWindow(QMainWindow):
         elif action_kind == "worker" and payload:
             if self._is_thread_running(self.worker):
                 return
-            if not payload.get("use_direct") and (not self.ai_assistant.uploaded_file or not getattr(self.ai_assistant, "chat_session", None)):
-                self.chat_panel.add_system_message("Please index the document first before retrying.")
-                self.chat_panel.show_index_button()
-                return
+            if not payload.get("use_direct"):
+                has_context = (self.ai_assistant.uploaded_file and getattr(self.ai_assistant, "chat_session", None)) if self.ai_assistant.provider == "cloud" else bool(getattr(self.ai_assistant, "local_document_text", None))
+                if not has_context:
+                    self.chat_panel.add_system_message("Please index the document first before retrying.")
+                    self.chat_panel.show_index_button()
+                    return
                 
-            self.chat_panel.show_loading()
+            self.chat_panel.set_generating_state(True)
             self.add_log("Retrying AI request with the same model...")
             self.worker = WorkerThread(
                 self.ai_assistant,
@@ -980,6 +1201,7 @@ class MainWindow(QMainWindow):
             self.worker.start()
         
     def on_worker_error(self, error_msg: str):
+        self.chat_panel.set_generating_state(False)
         self.chat_panel.add_system_error(error_msg)
         self.statusBar().showMessage("AI Error occurred. See chat panel.", 10000)
 
@@ -1004,7 +1226,7 @@ class MainWindow(QMainWindow):
         import sys
         
         date_str = datetime.datetime.now().strftime("%Y-%m-%d")
-        model = self.ai_assistant.model_name
+        model = self.ai_assistant.get_active_model_name()
         pdf_name = os.path.splitext(os.path.basename(self.pdf_doc.file_path))[0] if hasattr(self.pdf_doc, 'file_path') and self.pdf_doc.file_path else "Unknown_PDF"
         
         default_name = f"{date_str} - {model} - {pdf_name}.md"
@@ -1045,12 +1267,18 @@ class MainWindow(QMainWindow):
 
     def append_response_to_pdf(self, msg_data: dict):
         if not self.pdf_doc.doc:
+            self.chat_panel.set_all_append_disabled(False)
             QMessageBox.warning(self, "No PDF", "No PDF document is currently open.")
             return
             
         current_file = self.pdf_doc.file_path
         if not current_file:
+            self.chat_panel.set_all_append_disabled(False)
             QMessageBox.warning(self, "No PDF", "Cannot append to an unsaved PDF.")
+            return
+            
+        if self.active_generators:
+            logger.warning("PDF generation is already in progress.")
             return
             
         file_path = current_file
@@ -1077,9 +1305,19 @@ class MainWindow(QMainWindow):
             import json
             import tempfile
             import datetime
+            import html as html_mod
             
-            model = self.ai_assistant.model_name
+            model = self.ai_assistant.get_active_model_name()
+            if self.ai_assistant.provider == "local":
+                model_display = f"{model} (Local)"
+            else:
+                model_display = model
             date_str = datetime.datetime.now().strftime("%d/%m/%Y")
+            
+            safe_font = html_mod.escape(str(self.ai_font_family).replace('"', '\\"'))
+            safe_model = html_mod.escape(str(model_display))
+            safe_font_size = int(self.ai_font_size) if str(self.ai_font_size).isdigit() else 11
+            safe_date_str = html_mod.escape(date_str)
             
             html = f"""
             <!DOCTYPE html>
@@ -1103,7 +1341,7 @@ class MainWindow(QMainWindow):
             </script>
             <script src="tex-mml-chtml.js"></script>
             <style>
-            body {{ font-family: "{self.ai_font_family}", sans-serif; font-size: {self.ai_font_size}pt; padding: 10px; }}
+            body {{ font-family: "{safe_font}", sans-serif; font-size: {safe_font_size}pt; padding: 10px; }}
             .footer {{
                 text-align: right;
                 font-style: italic;
@@ -1135,7 +1373,7 @@ class MainWindow(QMainWindow):
             <body>
             <div id="content"></div>
             <div class="ai-tag">[[AI_GENERATED_PAGE]]</div>
-            <div class="footer">Generated by {model} on {date_str}</div>
+            <div class="footer">Generated by {safe_model} on {safe_date_str}</div>
             <script>
             const md = {json.dumps(markdown_content)};
             const parsed = (window.marked && window.DOMPurify) ? DOMPurify.sanitize(marked.parse(md)) : (window.DOMPurify ? DOMPurify.sanitize(md) : md);
@@ -1156,6 +1394,7 @@ class MainWindow(QMainWindow):
             
             def on_pdf_ready(success):
                 self.active_generators.discard(generator)
+                self.chat_panel.set_all_append_disabled(False)
                 if success:
                     merged, err_msg = self.pdf_doc.append_pdf_file(temp_path, file_path)
                     if merged:

@@ -7,9 +7,8 @@ from ui.main_window import MainWindow
 
 DEBUG = False
 
-# Default fallback model when no specific model has been selected or saved.
-# Change this model identifier here if a different fallback model is preferred in the future.
-DEFAULT_FALLBACK_MODEL = "gemini-flash-lite-latest"
+# icons found at: https://lucide.dev/icons/
+# To define the DEFAULT_FALLBACK_MODEL (the model used when no model has been selected), please edit backend/config_manager.py
 
 class PDFViewerApp(QApplication):
     def __init__(self, argv):
@@ -31,11 +30,6 @@ def main():
     os.environ["QT_API"] = "pyside6"
     os.environ["DEBUG_AI"] = "1" if DEBUG else "0"
     
-    if getattr(sys, 'frozen', False):
-        # Running in a PyInstaller bundle
-        app_dir = sys._MEIPASS if hasattr(sys, '_MEIPASS') else os.path.dirname(sys.executable)
-        os.chdir(app_dir)
-        
     app = PDFViewerApp(sys.argv)
     app.setApplicationName("AI PDF Viewer")
     
@@ -52,7 +46,18 @@ def main():
     window = MainWindow()
     app.set_main_window(window)
     window.show()
-    
+
+    def on_quit():
+        try:
+            from backend.ai_assistant import release_local_ai_models
+            from backend.config_manager import ConfigManager
+            cfg = ConfigManager()
+            release_local_ai_models(cfg.local_endpoint_url, cfg.local_model_name)
+        except Exception:
+            pass
+
+    app.aboutToQuit.connect(on_quit)
+
     # Handle files passed via command line
     if len(sys.argv) > 1 and sys.argv[1].endswith(".pdf"):
         window.load_pdf(sys.argv[1])

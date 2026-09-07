@@ -51,7 +51,7 @@ def test_ai_font_size_setter(clean_settings):
     assert clean_settings.ai_font_size == 14
 
 def test_app_style_default_and_setter(clean_settings):
-    assert clean_settings.app_style == "Native macOS"
+    assert clean_settings.app_style == "Native"
     clean_settings.app_style = "Adobe Acrobat"
     assert clean_settings.app_style == "Adobe Acrobat"
 
@@ -68,7 +68,7 @@ def test_theme_manager_resolve_mode():
 
 def test_theme_manager_palettes():
     from ui.theme_manager import ThemeManager
-    for style in ["Native macOS", "Adobe Acrobat", "Minimalist"]:
+    for style in ["Native", "Adobe Acrobat", "Minimalist"]:
         for mode in ["System (Auto)", "Light", "Dark"]:
             p = ThemeManager.get_palette(style, mode)
             assert "bg_window" in p
@@ -78,4 +78,23 @@ def test_theme_manager_palettes():
             assert len(css) > 50
             chat_css = ThemeManager.get_chat_css(style, mode, "Optima", 11)
             assert len(chat_css) > 50
+
+def test_local_ai_settings(clean_settings):
+    assert clean_settings.ai_provider == "cloud"
+    assert clean_settings.local_endpoint_url == "http://localhost:11434/v1"
+    assert clean_settings.local_model_name == "mistral-nemo:latest"
+    assert clean_settings.local_timeout_sec == 300
+
+    clean_settings.ai_provider = "local"
+    clean_settings.local_endpoint_url = "http://localhost:8080/v1"
+    clean_settings.local_model_name = "mistral-nemo:12b"
+    clean_settings.local_timeout_sec = 600
+
+    assert clean_settings.ai_provider == "local"
+    assert clean_settings.local_endpoint_url == "http://localhost:8080/v1"
+    assert clean_settings.local_model_name == "mistral-nemo:12b"
+    assert clean_settings.local_timeout_sec == 600
+
+
+
 

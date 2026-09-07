@@ -29,7 +29,8 @@ class AnnotationTool(Enum):
 
 def load_svg_icon(svg_filename: str, active: bool = False, is_dark: bool = False, size: int = 24) -> QIcon:
     """Loads and tints local SVGs for high-DPI retina display."""
-    svg_path = os.path.join("icons", svg_filename)
+    from ui.asset_loader import get_icon_path
+    svg_path = get_icon_path(svg_filename)
     if not os.path.exists(svg_path):
         return QIcon()
     try:
@@ -180,7 +181,7 @@ class FloatingAnnotationBar(QWidget):
         
         self.setFixedHeight(34)
 
-    def update_theme(self, app_style: str = "Native macOS", color_mode: str = "Light"):
+    def update_theme(self, app_style: str = "Native", color_mode: str = "Light"):
         mode = ThemeManager.resolve_color_mode(color_mode)
         self.is_dark = (mode.lower() == "dark")
         self.bg_color = QColor("#242426") if self.is_dark else QColor(255, 255, 255)

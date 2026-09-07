@@ -5,6 +5,14 @@ import sys
 from PySide6.QtCore import QStandardPaths
 from backend.logger import logger
 
+def get_bundle_dir() -> str:
+    """Returns absolute path to the application bundle/root directory across OSes and packaging modes."""
+    if getattr(sys, 'frozen', False):
+        if hasattr(sys, '_MEIPASS'):
+            return sys._MEIPASS
+        return os.path.dirname(sys.executable)
+    return os.path.abspath(os.path.join(os.path.dirname(__file__), ".."))
+
 class PromptsManager:
     def __init__(self, file_path: str = None):
         if file_path:
@@ -19,19 +27,14 @@ class PromptsManager:
         prompts = {}
         if not os.path.exists(self.file_path):
             # Check for bundled template first
-            bundled_candidates = [
-                os.path.join(getattr(sys, '_MEIPASS', ''), "custom_prompts.csv") if hasattr(sys, '_MEIPASS') else "",
-                os.path.abspath("custom_prompts.csv"),
-            ]
+            bundled_template = os.path.join(get_bundle_dir(), "custom_prompts.csv")
             seeded = False
-            for candidate in bundled_candidates:
-                if candidate and os.path.exists(candidate) and os.path.abspath(candidate) != os.path.abspath(self.file_path):
-                    try:
-                        shutil.copy2(candidate, self.file_path)
-                        seeded = True
-                        break
-                    except Exception:
-                        pass
+            if os.path.exists(bundled_template) and os.path.abspath(bundled_template) != os.path.abspath(self.file_path):
+                try:
+                    shutil.copy2(bundled_template, self.file_path)
+                    seeded = True
+                except Exception as e:
+                    logger.warning(f"Could not copy bundled prompts template: {e}")
             if not seeded:
                 # Create default if missing
                 self.save_prompts({

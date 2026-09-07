@@ -187,3 +187,36 @@ def test_pdf_view_annotation_signals(qtbot):
     with qtbot.waitSignal(view.annotation_changed, timeout=1000) as blocker:
         view.annotation_changed.emit(0)
     assert blocker.args == [0]
+
+
+def test_is_saved_flag_and_background_save(sample_pdf, qtbot):
+    from ui.main_window import BackgroundSaveWorker
+    
+    # 1. Initial state: loaded document is saved
+    assert sample_pdf.is_saved is True
+    assert sample_pdf.is_dirty is False
+    
+    # 2. Add an annotation -> is_saved becomes False
+    sample_pdf.add_highlight_annotation(0, [(50, 90, 150, 110)])
+    assert sample_pdf.is_saved is False
+    assert sample_pdf.is_dirty is True
+    
+    # 3. Save via BackgroundSaveWorker
+    with sample_pdf._lock:
+        doc_bytes = sample_pdf.doc.tobytes(deflate=True)
+        version = sample_pdf._version
+        
+    worker = BackgroundSaveWorker(sample_pdf.file_path, doc_bytes, version)
+    with qtbot.waitSignal(worker.save_finished, timeout=2000) as blocker:
+        worker.start()
+        
+    worker.wait(1000)
+    success, err, ver = blocker.args
+    assert success is True
+    assert ver == version
+    
+    # On completion, document on disk matches display
+    sample_pdf.is_saved = True
+    sample_pdf.is_dirty = False
+    assert sample_pdf.is_saved is True
+

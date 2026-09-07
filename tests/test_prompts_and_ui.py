@@ -44,12 +44,12 @@ def test_floating_annotation_bar_theme(qtbot):
     qtbot.addWidget(bar)
     
     # Light theme
-    bar.update_theme("Native macOS", "Light")
+    bar.update_theme("Native", "Light")
     assert not bar.is_dark
     assert bar.bg_color == QColor(255, 255, 255)
     
     # Dark theme
-    bar.update_theme("Native macOS", "Dark")
+    bar.update_theme("Native", "Dark")
     assert bar.is_dark
     assert bar.bg_color == QColor("#242426")
 
@@ -213,5 +213,378 @@ def test_page_item_tile_loaded_positioning_and_scale(qtbot):
     # Test clear_tile
     page_item.clear_tile()
     assert page_item.tile_item is None
+
+
+def test_ai_chat_panel_generating_state_and_stop_button(qtbot):
+    from ui.ai_chat_panel import AIChatPanel
+    
+    panel = AIChatPanel()
+    qtbot.addWidget(panel)
+    panel.set_index_status("indexed")
+    
+    # 1. Initial idle state
+    assert panel.is_generating is False
+    assert panel.prompts_combo.isEnabled() is True
+    assert panel.input_field.isEnabled() is True
+    assert panel.send_btn.text() == "Send"
+    
+    # 2. Enter prompt -> switches to generating state
+    panel.input_field.setText("What is the main finding?")
+    with qtbot.waitSignal(panel.message_sent, timeout=1000) as blocker:
+        panel._send_message()
+        
+    assert panel.is_generating is True
+    assert panel.prompts_combo.isEnabled() is False
+    assert panel.input_field.isEnabled() is False
+    assert panel.send_btn.text() == "Stop"
+    
+    # 3. Clicking send_btn while generating triggers stop
+    with qtbot.waitSignal(panel.stop_requested, timeout=1000) as stop_blocker:
+        panel._send_message()
+        
+    assert stop_blocker.signal_triggered
+    assert panel.is_generating is False
+    assert panel.prompts_combo.isEnabled() is True
+    assert panel.input_field.isEnabled() is True
+    assert panel.send_btn.text() == "Send"
+
+def test_close_event_zombie_threads_cleanup(qtbot, monkeypatch):
+    import keyring
+    from unittest.mock import MagicMock
+    from PySide6.QtGui import QCloseEvent
+    from PySide6.QtCore import QThread
+    monkeypatch.setattr(keyring, "get_password", lambda *args, **kwargs: None)
+    from ui.main_window import MainWindow
+
+    window = MainWindow()
+    qtbot.addWidget(window)
+    monkeypatch.setattr(window, "maybe_save_prompt", lambda: True)
+
+    # Create mock running threads
+    mock_zombie = MagicMock(spec=QThread)
+    mock_zombie.isRunning.return_value = True
+    mock_zombie.wait.return_value = True
+
+    mock_worker = MagicMock(spec=QThread)
+    mock_worker.isRunning.return_value = True
+    mock_worker.wait.return_value = True
+
+    window.zombie_threads.add(mock_zombie)
+    window.worker = mock_worker
+
+    event = QCloseEvent()
+    window.closeEvent(event)
+
+    assert event.isAccepted()
+    mock_zombie.quit.assert_called_once()
+    mock_zombie.wait.assert_called_with(3000)
+    mock_worker.quit.assert_called_once()
+    mock_worker.wait.assert_called_with(3000)
+    assert len(window.zombie_threads) == 0
+    assert window.worker is None
+
+def test_append_pdf_state_and_concurrency_protection(qtbot, monkeypatch):
+    import keyring
+    from unittest.mock import MagicMock
+    monkeypatch.setattr(keyring, "get_password", lambda *args, **kwargs: None)
+    from ui.main_window import MainWindow
+    from ui.ai_chat_panel import AIChatPanel
+
+    # 1. Test AIChatPanel template contains global disable logic
+    panel = AIChatPanel()
+    qtbot.addWidget(panel)
+    template = panel._get_html_template()
+    assert "setAllAppendDisabled" in template
+    assert "appendedIndices" in template
+    assert "isAppending" in template
+
+    # 2. Test MainWindow append concurrency prevention
+    window = MainWindow()
+    qtbot.addWidget(window)
+    window.chat_panel.set_all_append_disabled = MagicMock()
+
+    # When no PDF loaded
+    window.append_response_to_pdf({"content": "test", "title": "test"})
+    window.chat_panel.set_all_append_disabled.assert_called_with(False)
+
+    # When an active generator is already in progress
+    window.pdf_doc.doc = MagicMock()
+    window.pdf_doc.file_path = "/path/to/test.pdf"
+    mock_gen = MagicMock()
+    window.active_generators.add(mock_gen)
+
+    window.chat_panel.set_all_append_disabled.reset_mock()
+    monkeypatch.setattr("ui.main_window.PDFGenerator", MagicMock())
+    window.append_response_to_pdf({"content": "test", "title": "test"})
+    # Should not spawn a new generator when one is active
+    assert len(window.active_generators) == 1
+
+def test_thumbnail_panel_async_loading(qtbot):
+    from unittest.mock import MagicMock
+    from PySide6.QtGui import QImage
+    from ui.thumbnail_panel import ThumbnailPanel
+
+    panel = ThumbnailPanel()
+    qtbot.addWidget(panel)
+
+    mock_doc = MagicMock()
+    mock_doc.page_count = 3
+    sample_img = QImage(100, 140, QImage.Format_RGB888)
+    sample_img.fill(0xFFFFFF)
+    mock_doc.get_page_thumbnail.return_value = sample_img
+    mock_doc.is_ai_generated.return_value = False
+
+    panel.set_document(mock_doc)
+
+    # 1. Placeholders should be created immediately
+    assert panel.list_widget.count() == 3
+    assert panel.list_widget.item(0).text() == "Page 1"
+    assert panel.list_widget.item(1).text() == "Page 2"
+    assert panel.list_widget.item(2).text() == "Page 3"
+
+    # 2. Wait for background thread pool execution to finish loading thumbnails
+    def check_thumbnails_loaded():
+        assert not panel.list_widget.item(0).icon().isNull()
+
+    qtbot.waitUntil(check_thumbnails_loaded, timeout=2000)
+
+    # 3. Test refresh_thumbnail
+    panel.refresh_thumbnail(0)
+
+def test_append_response_html_escaping(qtbot, monkeypatch):
+    import keyring
+    from unittest.mock import MagicMock
+    monkeypatch.setattr(keyring, "get_password", lambda *args, **kwargs: None)
+    from ui.main_window import MainWindow
+
+    window = MainWindow()
+    qtbot.addWidget(window)
+    window.pdf_doc.doc = MagicMock()
+    window.pdf_doc.file_path = "/path/to/test.pdf"
+
+    # Inject malicious / unsafe font and model strings
+    window.ai_font_family = 'Helvetica"; } body { display: none; } /*'
+    window.ai_assistant.model_name = '<script>alert("xss")</script>'
+
+    captured_html = []
+    class MockGenerator:
+        def __init__(self, html, output_path):
+            captured_html.append(html)
+            self.finished = MagicMock()
+
+    monkeypatch.setattr("ui.main_window.PDFGenerator", MockGenerator)
+    window.append_response_to_pdf({"content": "Safe content", "title": "Test"})
+
+    assert len(captured_html) == 1
+    html = captured_html[0]
+    assert "<script>alert" not in html
+    assert "&lt;script&gt;alert(&quot;xss&quot;)&lt;/script&gt;" in html
+    assert 'Helvetica\\&quot;; } body { display: none; } /*' in html
+
+
+def test_append_pdf_response_local_model_identification(qtbot, monkeypatch):
+    import keyring
+    from unittest.mock import MagicMock
+    from backend.config_manager import ConfigManager
+    monkeypatch.setattr(keyring, "get_password", lambda *args, **kwargs: None)
+    monkeypatch.setattr(ConfigManager, "ai_provider", "local")
+    monkeypatch.setattr(ConfigManager, "local_model_name", "qwen2.5:7b")
+    from ui.main_window import MainWindow
+
+    window = MainWindow()
+    qtbot.addWidget(window)
+    window.pdf_doc.doc = MagicMock()
+    window.pdf_doc.file_path = "/path/to/test.pdf"
+
+    captured_html = []
+    class MockGenerator:
+        def __init__(self, html, output_path):
+            captured_html.append(html)
+            self.finished = MagicMock()
+
+    monkeypatch.setattr("ui.main_window.PDFGenerator", MockGenerator)
+    window.append_response_to_pdf({"content": "Answer text", "title": "Conclusion"})
+
+    assert len(captured_html) == 1
+    html = captured_html[0]
+    assert "Generated by qwen2.5:7b (Local)" in html
+
+
+def test_chat_bridge_slots_and_signals(qtbot):
+    from ui.ai_chat_panel import ChatBridge
+    bridge = ChatBridge()
+
+    with qtbot.waitSignal(bridge.double_clicked_idx, timeout=1000) as blocker:
+        bridge.on_double_click(42)
+    assert blocker.args == [42]
+
+    with qtbot.waitSignal(bridge.append_pdf_idx, timeout=1000) as blocker:
+        bridge.on_append_pdf(7)
+    assert blocker.args == [7]
+
+    with qtbot.waitSignal(bridge.edit_msg_idx, timeout=1000) as blocker:
+        bridge.on_edit_msg(13)
+    assert blocker.args == [13]
+
+    with qtbot.waitSignal(bridge.open_settings_requested, timeout=1000) as blocker:
+        bridge.on_open_settings()
+    assert blocker.signal_triggered
+
+    with qtbot.waitSignal(bridge.retry_requested, timeout=1000) as blocker:
+        bridge.on_retry()
+    assert blocker.signal_triggered
+
+def test_chat_panel_qwebchannel_setup(qtbot):
+    from ui.ai_chat_panel import AIChatPanel
+    panel = AIChatPanel()
+    qtbot.addWidget(panel)
+
+    assert panel.bridge is not None
+    assert panel.channel is not None
+    template = panel._get_html_template()
+    assert "qwebchannel.js" in template
+    assert "window.pyBridge" in template
+    assert "notifyDoubleClick" in template
+    assert "notifyAppendPdf" in template
+    assert "notifyEditMsg" in template
+
+def test_chat_panel_append_flow(qtbot):
+    from ui.ai_chat_panel import AIChatPanel
+    panel = AIChatPanel()
+    qtbot.addWidget(panel)
+
+    panel.add_ai_message("Test answer to append", original_prompt="Prompt", display_title="Title")
+    with qtbot.waitSignal(panel.append_requested, timeout=1000) as blocker:
+        panel.bridge.on_append_pdf(0)
+    assert blocker.signal_triggered
+    data = blocker.args[0]
+    assert data["content"] == "Test answer to append"
+    assert data["prompt"] == "Prompt"
+    assert data["title"] == "Title"
+
+def test_config_dialog_provider_switching_and_local_models(qtbot, monkeypatch):
+    from ui.config_dialog import ConfigDialog
+
+    # Mock fetch_local_models to avoid unmocked thread in tests
+    monkeypatch.setattr(ConfigDialog, "fetch_local_models", lambda self: None)
+
+    dialog = ConfigDialog(initial_tab=1)
+    qtbot.addWidget(dialog)
+
+    # Initial state should be Cloud
+    assert dialog.radio_cloud.isChecked()
+    assert not dialog.cloud_container.isHidden()
+    assert dialog.local_container.isHidden()
+
+    # Switch to Local
+    dialog.radio_local.setChecked(True)
+    assert dialog.cloud_container.isHidden()
+    assert not dialog.local_container.isHidden()
+
+    # Set local model in dropdown
+    dialog.local_model_combo.clear()
+    dialog.local_model_combo.addItems(["mistral-nemo:latest", "llama3.2:latest"])
+    dialog.local_model_combo.setCurrentText("mistral-nemo:latest")
+
+    # Save via accept
+    dialog.accept()
+    assert dialog.config.ai_provider == "local"
+    assert dialog.config.local_model_name == "mistral-nemo:latest"
+
+    # Cleanup settings
+    dialog.config.ai_provider = "cloud"
+
+
+
+def test_config_dialog_done_safety_with_threads(qtbot, monkeypatch):
+    from ui.config_dialog import ConfigDialog
+    from PySide6.QtCore import QThread, Signal
+
+    class DummyFetcher(QThread):
+        models_fetched = Signal(list)
+        error_occurred = Signal(str)
+        def __init__(self, endpoint="", parent=None):
+            super().__init__(parent)
+        def run(self):
+            pass
+
+    monkeypatch.setattr("ui.config_dialog.LocalModelFetcherThread", DummyFetcher)
+
+    dialog = ConfigDialog(initial_tab=1)
+    qtbot.addWidget(dialog)
+
+    # Simulate thread starting and closing dialog
+    dialog.fetch_local_models()
+    assert dialog.local_fetcher is not None
+    dialog.local_fetcher.wait(1000)
+    dialog.accept()
+
+
+def test_local_model_fetcher_thread(qtbot):
+    from ui.config_dialog import LocalModelFetcherThread
+    import json
+    from unittest.mock import MagicMock, patch
+
+    mock_resp = MagicMock()
+    mock_resp.status = 200
+    mock_resp.read.return_value = json.dumps({
+        "models": [{"name": "qwen2.5:7b"}, {"name": "mistral-nemo:latest"}]
+    }).encode("utf-8")
+    mock_resp.__enter__.return_value = mock_resp
+
+    fetched_models = []
+    fetcher = LocalModelFetcherThread("http://localhost:11434/v1")
+    fetcher.models_fetched.connect(lambda m: fetched_models.extend(m))
+
+    with patch("urllib.request.urlopen", return_value=mock_resp):
+        with qtbot.waitSignal(fetcher.models_fetched, timeout=2000):
+            fetcher.start()
+
+    assert fetched_models == ["qwen2.5:7b", "mistral-nemo:latest"]
+
+
+def test_chat_panel_time_estimation(qtbot, monkeypatch):
+    from ui.ai_chat_panel import AIChatPanel
+    from backend.config_manager import ConfigManager
+    from backend.model_benchmark import ModelBenchmarkManager
+
+    monkeypatch.setattr(ConfigManager, "ai_provider", "local")
+    monkeypatch.setattr(ConfigManager, "local_model_name", "qwen2.5:7b")
+
+    ModelBenchmarkManager.reset()
+    mgr = ModelBenchmarkManager()
+    mgr.clear_model_runs()
+
+    panel = AIChatPanel()
+    qtbot.addWidget(panel)
+
+    panel.set_prompts({"Summary": "Summarize the document", "Key Points": "List key points"})
+    panel.set_document_tokens(3500)
+
+    # Initial state with no benchmark history should show "NA"
+    panel.input_field.setText("What is this about?")
+    assert panel.send_btn.text() == "Send (NA)"
+
+    # Calibrate model with benchmark runs
+    mgr = ModelBenchmarkManager()
+    mgr.record_run_time("qwen2.5:7b", in_tokens=3000, out_tokens=300, duration_sec=15.0)
+
+    # Trigger estimate update
+    panel._update_send_button_estimate()
+    assert "Send (~" in panel.send_btn.text()
+
+    # When switching to predefined prompt
+    panel.prompts_combo.setCurrentIndex(1)
+    assert "Send (~" in panel.send_btn.text()
+
+
+
+
+
+
+
+
+
+
 
 

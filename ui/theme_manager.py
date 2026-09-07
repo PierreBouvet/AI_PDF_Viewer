@@ -1,12 +1,12 @@
 """
 Theme and visual style manager for AI PDF Viewer.
-Supports Native macOS, Adobe Acrobat, and Minimalist styles in Light and Dark modes.
+Supports Native, Adobe Acrobat, and Minimalist styles in Light and Dark modes.
 """
 from PySide6.QtWidgets import QApplication
 from PySide6.QtGui import QColor
 
 THEMES = {
-    ("Native macOS", "Light"): {
+    ("Native", "Light"): {
         "bg_window": "#ececec",
         "bg_card": "#ffffff",
         "bg_panel": "#f6f6f8",
@@ -30,7 +30,7 @@ THEMES = {
         "chat_code_bg": "#2b2b2b",
         "chat_code_text": "#f8f8f2",
     },
-    ("Native macOS", "Dark"): {
+    ("Native", "Dark"): {
         "bg_window": "#1e1e1e",
         "bg_card": "#242426",
         "bg_panel": "#28282b",
@@ -183,26 +183,30 @@ class ThemeManager:
         return "Dark" if mode_str == "dark" else "Light"
 
     @staticmethod
-    def get_palette(app_style: str = "Native macOS", color_mode: str = "Light") -> dict:
+    def get_palette(app_style: str = "Native", color_mode: str = "Light") -> dict:
         resolved_mode = ThemeManager.resolve_color_mode(color_mode)
         key = (app_style, resolved_mode)
         if key in THEMES:
             return THEMES[key]
         # Fallback
-        return THEMES.get(("Native macOS", resolved_mode), THEMES[("Native macOS", "Light")])
+        return THEMES.get(("Native", resolved_mode), THEMES[("Native", "Light")])
 
     @staticmethod
-    def get_pdf_bg_color(app_style: str = "Native macOS", color_mode: str = "Light") -> QColor:
+    def get_pdf_bg_color(app_style: str = "Native", color_mode: str = "Light") -> QColor:
         palette = ThemeManager.get_palette(app_style, color_mode)
         return QColor(palette["pdf_bg"])
 
     @staticmethod
-    def get_stylesheet(app_style: str = "Native macOS", color_mode: str = "Light") -> str:
+    def get_stylesheet(app_style: str = "Native", color_mode: str = "Light") -> str:
         resolved_mode = ThemeManager.resolve_color_mode(color_mode)
         p = ThemeManager.get_palette(app_style, resolved_mode)
         
         is_dark = (resolved_mode.lower() == "dark")
         font_family = '-apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif'
+        
+        arrow_icon_name = "chevron-down-dark.svg" if is_dark else "chevron-down-light.svg"
+        from ui.asset_loader import get_icon_path
+        arrow_icon_path = get_icon_path(arrow_icon_name).replace("\\", "/")
         
         return f"""
         QMainWindow, QDialog, QWidget#centralWidget {{
@@ -242,7 +246,7 @@ class ThemeManager:
             color: {p['text_secondary']};
         }}
         
-        QLineEdit, QComboBox, QSpinBox, QFontComboBox {{
+        QLineEdit, QSpinBox {{
             background-color: {p['bg_input']};
             color: {p['text_primary']};
             border: 1px solid {p['border']};
@@ -252,15 +256,41 @@ class ThemeManager:
             selection-background-color: {p['accent']};
             selection-color: {p['accent_text']};
         }}
-        QLineEdit:focus, QComboBox:focus, QSpinBox:focus, QFontComboBox:focus {{
+        QLineEdit:focus, QSpinBox:focus {{
             border: 1px solid {p['accent']};
         }}
         
-        QComboBox::drop-down {{
-            border: none;
-            width: 20px;
+        QComboBox, QFontComboBox {{
+            background-color: {p['bg_input']};
+            color: {p['text_primary']};
+            border: 1px solid {p['border']};
+            border-radius: {p['radius']};
+            padding: 4px 24px 4px 8px;
+            min-height: 20px;
+            selection-background-color: {p['accent']};
+            selection-color: {p['accent_text']};
         }}
-        QComboBox QAbstractItemView {{
+        QComboBox:focus, QFontComboBox:focus {{
+            border: 1px solid {p['accent']};
+        }}
+        
+        QComboBox::drop-down, QFontComboBox::drop-down {{
+            subcontrol-origin: padding;
+            subcontrol-position: top right;
+            width: 20px;
+            border: none;
+            background: transparent;
+        }}
+        QComboBox::down-arrow, QFontComboBox::down-arrow {{
+            image: url("{arrow_icon_path}");
+            width: 10px;
+            height: 10px;
+        }}
+        QComboBox::down-arrow:disabled, QFontComboBox::down-arrow:disabled {{
+            opacity: 0.4;
+        }}
+        
+        QComboBox QAbstractItemView, QFontComboBox QAbstractItemView {{
             background-color: {p['bg_card']};
             color: {p['text_primary']};
             border: 1px solid {p['border']};
@@ -268,6 +298,10 @@ class ThemeManager:
             selection-background-color: {p['accent']};
             selection-color: {p['accent_text']};
             padding: 4px;
+        }}
+        QComboBox QAbstractItemView::item, QFontComboBox QAbstractItemView::item {{
+            min-height: 18px;
+            padding: 2px 6px;
         }}
         
         QListWidget {{
@@ -472,7 +506,7 @@ class ThemeManager:
         """
 
     @staticmethod
-    def apply_theme(app, app_style: str = "Native macOS", color_mode: str = "Light"):
+    def apply_theme(app, app_style: str = "Native", color_mode: str = "Light"):
         """Applies stylesheet globally to the Qt application."""
         if app is None:
             app = QApplication.instance()

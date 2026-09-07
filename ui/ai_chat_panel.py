@@ -1,15 +1,40 @@
 from PySide6.QtWidgets import QWidget, QVBoxLayout, QHBoxLayout, QLineEdit, QPushButton, QComboBox, QDialog, QLabel
 from PySide6.QtWebEngineWidgets import QWebEngineView
 from PySide6.QtWebEngineCore import QWebEnginePage
-from PySide6.QtCore import Signal, Qt
+from PySide6.QtWebChannel import QWebChannel
+from PySide6.QtCore import Signal, Slot, QObject, Qt
 import json
 from ui.theme_manager import ThemeManager
 from ui.asset_loader import get_assets_base_url
 
-class ChatWebPage(QWebEnginePage):
+class ChatBridge(QObject):
     double_clicked_idx = Signal(int)
     append_pdf_idx = Signal(int)
     edit_msg_idx = Signal(int)
+    open_settings_requested = Signal()
+    retry_requested = Signal()
+
+    @Slot(int)
+    def on_double_click(self, idx: int):
+        self.double_clicked_idx.emit(idx)
+
+    @Slot(int)
+    def on_append_pdf(self, idx: int):
+        self.append_pdf_idx.emit(idx)
+
+    @Slot(int)
+    def on_edit_msg(self, idx: int):
+        self.edit_msg_idx.emit(idx)
+
+    @Slot()
+    def on_open_settings(self):
+        self.open_settings_requested.emit()
+
+    @Slot()
+    def on_retry(self):
+        self.retry_requested.emit()
+
+class ChatWebPage(QWebEnginePage):
     open_settings_requested = Signal()
     retry_requested = Signal()
     
@@ -22,33 +47,10 @@ class ChatWebPage(QWebEnginePage):
                 self.retry_requested.emit()
                 return False
         return super().acceptNavigationRequest(url, _type, isMainFrame)
-        
-    def javaScriptConsoleMessage(self, level, message, lineNumber, sourceId):
-        if message.startswith("DOUBLE_CLICK_IDX:"):
-            try:
-                idx = int(message.split(":")[1])
-                self.double_clicked_idx.emit(idx)
-            except:
-                pass
-            return
-        if message.startswith("APPEND_PDF_IDX:"):
-            try:
-                idx = int(message.split(":")[1])
-                self.append_pdf_idx.emit(idx)
-            except:
-                pass
-            return
-        if message.startswith("EDIT_MSG_IDX:"):
-            try:
-                idx = int(message.split(":")[1])
-                self.edit_msg_idx.emit(idx)
-            except:
-                pass
-            return
-        super().javaScriptConsoleMessage(level, message, lineNumber, sourceId)
 
 class AIChatPanel(QWidget):
     message_sent = Signal(str, bool, str)
+    stop_requested = Signal()
     open_prompts_dialog = Signal()
     save_requested = Signal(dict)
     index_requested = Signal()
@@ -56,9 +58,10 @@ class AIChatPanel(QWidget):
     open_settings_requested = Signal()
     retry_requested = Signal()
     
-    def __init__(self, parent=None, app_style="Native macOS", color_mode="Light"):
+    def __init__(self, parent=None, app_style="Native", color_mode="Light"):
         super().__init__(parent)
         self.setMinimumWidth(0)
+        self.is_generating = False
         
         self.app_style = app_style
         self.color_mode = color_mode
@@ -77,9 +80,17 @@ class AIChatPanel(QWidget):
         # Chat History via WebEngine
         self.web_view = QWebEngineView()
         self.web_page = ChatWebPage(self.web_view)
-        self.web_page.double_clicked_idx.connect(self.request_save_message)
-        self.web_page.append_pdf_idx.connect(self.request_append_message)
-        self.web_page.edit_msg_idx.connect(self.request_edit_message)
+        self.bridge = ChatBridge(self)
+        self.channel = QWebChannel(self.web_page)
+        self.channel.registerObject("bridge", self.bridge)
+        self.web_page.setWebChannel(self.channel)
+        
+        self.bridge.double_clicked_idx.connect(self.request_save_message)
+        self.bridge.append_pdf_idx.connect(self.request_append_message)
+        self.bridge.edit_msg_idx.connect(self.request_edit_message)
+        self.bridge.open_settings_requested.connect(self.open_settings_requested)
+        self.bridge.retry_requested.connect(self.retry_requested)
+        
         self.web_page.open_settings_requested.connect(self.open_settings_requested)
         self.web_page.retry_requested.connect(self.retry_requested)
         self.web_view.setPage(self.web_page)
@@ -138,6 +149,10 @@ class AIChatPanel(QWidget):
         layout.addLayout(input_layout)
         
         self.prompts_dict = {}
+        self.document_tokens = 0
+        
+        self.prompts_combo.currentIndexChanged.connect(self._on_prompt_combo_changed)
+        self.input_field.textChanged.connect(self._update_send_button_estimate)
         
         self.set_index_status("unloaded")
         
@@ -175,6 +190,11 @@ class AIChatPanel(QWidget):
 
     def show_index_button(self):
         self.index_btn.setVisible(True)
+
+    def set_document_tokens(self, tokens: int):
+        """Set the estimated token count of the indexed document and update estimates."""
+        self.document_tokens = max(0, tokens)
+        self.update_estimated_times()
         
     def set_index_status(self, status: str, model_name: str = ""):
         is_indexed = (status == "indexed")
@@ -184,6 +204,7 @@ class AIChatPanel(QWidget):
         self.send_btn.setVisible(is_indexed)
         
         if status == "unloaded":
+            self.document_tokens = 0
             self.status_bar.setText("Status: Not Indexed")
             self.status_bar.setStyleSheet("background-color: #E81123; color: white; padding: 2px; font-size: 9pt; font-weight: bold;")
         elif status == "processing":
@@ -194,26 +215,142 @@ class AIChatPanel(QWidget):
             self.status_bar.setText(text)
             self.status_bar.setStyleSheet("background-color: #107C10; color: white; padding: 2px; font-size: 9pt; font-weight: bold;")
         
+        self.update_estimated_times()
+        
     def set_prompts(self, prompts: dict):
         self.prompts_dict = prompts
-        self.prompts_combo.clear()
-        self.prompts_combo.addItem("--- Custom Input ---")
-        self.prompts_combo.addItems(list(prompts.keys()))
+        self.update_estimated_times()
+
+    def update_estimated_times(self):
+        """Refresh estimated response times across prompts dropdown and the Send button."""
+        from backend.config_manager import ConfigManager
+        from backend.ai_assistant import estimate_response_time_seconds, format_estimated_duration
         
+        cfg = ConfigManager()
+        provider = cfg.ai_provider
+        model_name = cfg.local_model_name if provider == "local" else (cfg.model_name or "gemini-flash-lite-latest")
+
+        current_key = self.prompts_combo.currentData()
+        self.prompts_combo.blockSignals(True)
+        self.prompts_combo.clear()
+        self.prompts_combo.addItem("--- Custom Input ---", "")
+        
+        for k, v in self.prompts_dict.items():
+            if self.document_tokens > 0:
+                prompt_tokens = len(v) // 4
+                est_sec = estimate_response_time_seconds(provider, model_name, self.document_tokens, prompt_tokens, prompt_text=v)
+                est_str = format_estimated_duration(est_sec)
+                display_label = f"{k} ({est_str})" if est_str else k
+            else:
+                display_label = k
+            self.prompts_combo.addItem(display_label, k)
+            
+        if current_key:
+            idx = self.prompts_combo.findData(current_key)
+            if idx >= 0:
+                self.prompts_combo.setCurrentIndex(idx)
+        self.prompts_combo.blockSignals(False)
+
+        self._update_send_button_estimate()
+
+    def _on_prompt_combo_changed(self, index: int):
+        is_custom = (index <= 0)
+        self.input_field.setEnabled(is_custom)
+        if not is_custom:
+            self.input_field.setPlaceholderText("Predefined prompt selected above...")
+        else:
+            self.input_field.setPlaceholderText("Ask a question about the PDF...")
+        self._update_send_button_estimate()
+
+    def _update_send_button_estimate(self):
+        if getattr(self, 'is_generating', False):
+            self.send_btn.setText("Stop")
+            self.send_btn.setToolTip("")
+            return
+
+        from backend.config_manager import ConfigManager
+        from backend.ai_assistant import estimate_response_time_seconds, format_estimated_duration
+        
+        cfg = ConfigManager()
+        provider = cfg.ai_provider
+        model_name = cfg.local_model_name if provider == "local" else (cfg.model_name or "gemini-flash-lite-latest")
+
+        if self.document_tokens <= 0:
+            self.send_btn.setText("Send")
+            self.send_btn.setToolTip("Send question to AI assistant")
+            return
+
+        if self.prompts_combo.currentIndex() > 0:
+            key = self.prompts_combo.currentData()
+            prompt_text = self.prompts_dict.get(key, "")
+        else:
+            prompt_text = self.input_field.text().strip()
+
+        prompt_tokens = len(prompt_text) // 4
+        est_sec = estimate_response_time_seconds(provider, model_name, self.document_tokens, prompt_tokens, prompt_text=prompt_text)
+        est_str = format_estimated_duration(est_sec)
+
+        if est_str == "NA":
+            self.send_btn.setText("Send (NA)")
+            self.send_btn.setToolTip(
+                f"Estimated response time: NA\n"
+                f"• Model: {model_name}\n"
+                f"• Calibration: No previous runs recorded for this model yet. Run a prompt to calibrate.\n"
+                f"• Document context: ~{self.document_tokens:,} tokens\n"
+                f"• Prompt length: ~{prompt_tokens} tokens"
+            )
+        elif est_str:
+            from backend.model_benchmark import ModelBenchmarkManager
+            run_count = ModelBenchmarkManager().get_run_count(model_name)
+            calib_info = f" (calibrated from last {run_count} runs)" if run_count > 0 else ""
+            self.send_btn.setText(f"Send ({est_str})")
+            self.send_btn.setToolTip(
+                f"Estimated response time: {est_str}\n"
+                f"• Model: {model_name}{calib_info}\n"
+                f"• Document context: ~{self.document_tokens:,} tokens\n"
+                f"• Prompt length: ~{prompt_tokens} tokens"
+            )
+        else:
+            self.send_btn.setText("Send")
+            self.send_btn.setToolTip("Send question to AI assistant")
+        
+    def set_generating_state(self, is_generating: bool):
+        """Toggle input controls and switch Send/Stop button during AI generation."""
+        self.is_generating = is_generating
+        self.prompts_combo.setEnabled(not is_generating)
+        self.input_field.setEnabled(not is_generating and self.prompts_combo.currentIndex() <= 0)
+        if is_generating:
+            self.send_btn.setText("Stop")
+            self.send_btn.setStyleSheet("background-color: #e81123; color: #ffffff; font-weight: 500; border: none; border-radius: 4px; padding: 6px 12px;")
+            self.show_loading()
+        else:
+            self.send_btn.setStyleSheet("background-color: #dcdcdc; color: #000000; font-weight: 500; border: none; border-radius: 4px; padding: 6px 12px;")
+            self._update_send_button_estimate()
+            self.hide_loading()
+
     def _send_message(self):
+        if self.is_generating:
+            # Stop button clicked
+            self.stop_requested.emit()
+            self.add_system_message("Stopped by the user")
+            self.set_generating_state(False)
+            return
+
         text = ""
         is_custom = False
+        display_text = ""
         
         if self.prompts_combo.currentIndex() > 0:
-            expr = self.prompts_combo.currentText()
-            text = self.prompts_dict.get(expr, "")
+            key = self.prompts_combo.currentData()
+            text = self.prompts_dict.get(key, "")
             is_custom = True
+            display_text = key
         else:
             text = self.input_field.text().strip()
+            display_text = text
             
         if text:
-            # If it's a custom predefined prompt, show the expression instead of the huge prompt text
-            display_text = self.prompts_combo.currentText() if is_custom else text
+            # If it's a custom predefined prompt, show the expression name instead of huge prompt text
             self.add_user_message(display_text)
             
             if not is_custom:
@@ -222,7 +359,7 @@ class AIChatPanel(QWidget):
             # Automatically switch back to "--- Custom Input ---"
             self.prompts_combo.setCurrentIndex(0)
                 
-            self.show_loading()
+            self.set_generating_state(True)
             self.message_sent.emit(text, is_custom, display_text if is_custom else "")
             
     def show_loading(self):
@@ -241,6 +378,7 @@ class AIChatPanel(QWidget):
         <head>
             <meta charset="utf-8">
             <meta http-equiv="Content-Security-Policy" content="default-src 'self'; script-src 'self' 'unsafe-eval' 'nonce-{self.csp_nonce}'; style-src 'self' 'unsafe-inline'; img-src 'self' data: blob:; font-src 'self' data:;">
+            <script src="qwebchannel.js"></script>
             <script src="marked.min.js"></script>
             <script src="purify.min.js"></script>
             <script nonce="{self.csp_nonce}">
@@ -275,7 +413,88 @@ class AIChatPanel(QWidget):
                 }}
             </style>
             <script nonce="{self.csp_nonce}">
+                let pyBridge = null;
+                function initWebChannel(callback) {{
+                    if (window.pyBridge) {{
+                        if (callback) callback(window.pyBridge);
+                        return;
+                    }}
+                    if (typeof QWebChannel !== "undefined" && typeof qt !== "undefined" && qt.webChannelTransport) {{
+                        new QWebChannel(qt.webChannelTransport, function(channel) {{
+                            window.pyBridge = channel.objects.bridge;
+                            if (callback) callback(window.pyBridge);
+                        }});
+                    }}
+                }}
+                initWebChannel();
+                window.addEventListener('load', function() {{ initWebChannel(); }});
+
+                function notifyDoubleClick(idx) {{
+                    initWebChannel(function(bridge) {{
+                        if (bridge && bridge.on_double_click) {{
+                            bridge.on_double_click(parseInt(idx));
+                        }}
+                    }});
+                }}
+
+                function notifyEditMsg(idx) {{
+                    initWebChannel(function(bridge) {{
+                        if (bridge && bridge.on_edit_msg) {{
+                            bridge.on_edit_msg(parseInt(idx));
+                        }}
+                    }});
+                }}
+
+                function notifyAppendPdf(idx) {{
+                    initWebChannel(function(bridge) {{
+                        if (bridge && bridge.on_append_pdf) {{
+                            bridge.on_append_pdf(parseInt(idx));
+                        }}
+                    }});
+                }}
+
+                let isAppending = false;
+                const appendedIndices = new Set();
+
+                function setAllAppendDisabled(disabled) {{
+                    isAppending = disabled;
+                    const buttons = document.querySelectorAll('button[data-action="append"]');
+                    buttons.forEach(btn => {{
+                        const idx = parseInt(btn.getAttribute('data-idx'));
+                        if (isAppending) {{
+                            btn.disabled = true;
+                            btn.style.opacity = '0.5';
+                            btn.style.cursor = 'not-allowed';
+                        }} else {{
+                            if (appendedIndices.has(idx)) {{
+                                btn.disabled = true;
+                                btn.style.opacity = '0.5';
+                                btn.style.cursor = 'not-allowed';
+                            }} else {{
+                                btn.disabled = false;
+                                btn.style.opacity = '1.0';
+                                btn.style.cursor = 'pointer';
+                            }}
+                        }}
+                    }});
+                }}
+
+                function getAppendButtonHtml(idx) {{
+                    const isAppended = appendedIndices.has(idx);
+                    const isDisabled = isAppending || isAppended;
+                    const style = isDisabled
+                        ? "margin-top:8px; padding:4px 8px; font-size:9pt; cursor:not-allowed; opacity:0.5; background-color:#e1e1e1; border:1px solid #ccc; border-radius:4px;"
+                        : "margin-top:8px; padding:4px 8px; font-size:9pt; cursor:pointer; opacity:1.0; background-color:#e1e1e1; border:1px solid #ccc; border-radius:4px;";
+                    const disabledAttr = isDisabled ? " disabled" : "";
+                    return `<button data-action="append" data-idx="${{idx}}" style="${{style}}"${{disabledAttr}}>Append to PDF</button>`;
+                }}
+
+                function getEditButtonHtml(idx) {{
+                    return `<button data-action="edit" data-idx="${{idx}}" style="margin-top:8px; margin-right:8px; padding:4px 8px; font-size:9pt; cursor:pointer; background-color:#e1e1e1; border:1px solid #ccc; border-radius:4px;">Edit Response</button>`;
+                }}
+
                 document.addEventListener('DOMContentLoaded', () => {{
+                    initWebChannel();
                     const container = document.getElementById('chat-container');
                     if (container) {{
                         container.addEventListener('click', (e) => {{
@@ -284,25 +503,17 @@ class AIChatPanel(QWidget):
                             const action = target.getAttribute('data-action');
                             const idx = target.getAttribute('data-idx');
                             if (action === 'edit') {{
-                                console.log('EDIT_MSG_IDX:' + idx);
+                                notifyEditMsg(idx);
                             }} else if (action === 'append') {{
-                                target.disabled = true;
-                                target.style.opacity = '0.5';
-                                target.style.cursor = 'not-allowed';
-                                console.log('APPEND_PDF_IDX:' + idx);
+                                if (isAppending) return;
+                                const numIdx = parseInt(idx);
+                                appendedIndices.add(numIdx);
+                                setAllAppendDisabled(true);
+                                notifyAppendPdf(idx);
                             }}
                         }});
                     }}
                 }});
-
-                function setAppendDisabled(idx, disabled) {{
-                    const btn = document.querySelector(`button[data-action="append"][data-idx="${{idx}}"]`);
-                    if (btn) {{
-                        btn.disabled = disabled;
-                        btn.style.opacity = disabled ? '0.5' : '1.0';
-                        btn.style.cursor = disabled ? 'not-allowed' : 'pointer';
-                    }}
-                }}
 
                 function renderMarkdownSafe(text) {{
                     if (!window.DOMPurify) {{
@@ -401,7 +612,7 @@ class AIChatPanel(QWidget):
                     if (idx !== undefined && idx !== null) {{
                         msgDiv.id = 'msg-' + idx;
                         msgDiv.ondblclick = function() {{
-                            console.log("DOUBLE_CLICK_IDX:" + idx);
+                            notifyDoubleClick(idx);
                         }};
                         msgDiv.style.cursor = "pointer";
                         msgDiv.title = "Double-click to open in new window";
@@ -420,8 +631,7 @@ class AIChatPanel(QWidget):
                             html += sanitizeText(text);
                         }}
                         if (idx !== undefined && idx !== null) {{
-                            html += `<br><button data-action="edit" data-idx="${{idx}}" style="margin-top:8px; margin-right:8px; padding:4px 8px; font-size:9pt; cursor:pointer; background-color:#e1e1e1; border:1px solid #ccc; border-radius:4px;">Edit Response</button>`;
-                            html += `<button data-action="append" data-idx="${{idx}}" style="margin-top:8px; padding:4px 8px; font-size:9pt; cursor:pointer; background-color:#e1e1e1; border:1px solid #ccc; border-radius:4px;">Append to PDF</button>`;
+                            html += '<br>' + getEditButtonHtml(idx) + getAppendButtonHtml(idx);
                         }}
                         msgDiv.innerHTML = html;
                     }}
@@ -437,7 +647,7 @@ class AIChatPanel(QWidget):
                     
                     if (idx !== undefined && idx !== null) {{
                         msgDiv.ondblclick = function() {{
-                            console.log("DOUBLE_CLICK_IDX:" + idx);
+                            notifyDoubleClick(idx);
                         }};
                         msgDiv.style.cursor = "pointer";
                         msgDiv.title = "Double-click to open in new window";
@@ -452,7 +662,7 @@ class AIChatPanel(QWidget):
                         html += `<div class='explain-section'><b>${{title}}</b><br>${{parsedPart}}</div>`;
                     }}
                     if (idx !== undefined && idx !== null) {{
-                        html += `<br><button data-action="append" data-idx="${{idx}}" style="margin-top:8px; padding:4px 8px; font-size:9pt; cursor:pointer; background-color:#e1e1e1; border:1px solid #ccc; border-radius:4px;">Append to PDF</button>`;
+                        html += '<br>' + getAppendButtonHtml(idx);
                     }}
                     
                     msgDiv.innerHTML = html;
@@ -468,7 +678,7 @@ class AIChatPanel(QWidget):
                     if (idx !== undefined && idx !== null) {{
                         msgDiv.id = 'msg-' + idx;
                         msgDiv.ondblclick = function() {{
-                            console.log("DOUBLE_CLICK_IDX:" + idx);
+                            notifyDoubleClick(idx);
                         }};
                         msgDiv.style.cursor = "pointer";
                         msgDiv.title = "Double-click to open in new window";
@@ -477,8 +687,7 @@ class AIChatPanel(QWidget):
                     let parsedText = renderMarkdownSafe(text);
                     let html = `<b>AI Discuss:</b><br><div class='discuss-section'>${{parsedText}}</div>`;
                     if (idx !== undefined && idx !== null) {{
-                        html += `<br><button data-action="edit" data-idx="${{idx}}" style="margin-top:8px; margin-right:8px; padding:4px 8px; font-size:9pt; cursor:pointer; background-color:#e1e1e1; border:1px solid #ccc; border-radius:4px;">Edit Response</button>`;
-                        html += `<button data-action="append" data-idx="${{idx}}" style="margin-top:8px; padding:4px 8px; font-size:9pt; cursor:pointer; background-color:#e1e1e1; border:1px solid #ccc; border-radius:4px;">Append to PDF</button>`;
+                        html += '<br>' + getEditButtonHtml(idx) + getAppendButtonHtml(idx);
                     }}
                     
                     msgDiv.innerHTML = html;
@@ -494,7 +703,7 @@ class AIChatPanel(QWidget):
                     if (idx !== undefined && idx !== null) {{
                         msgDiv.id = 'msg-' + idx;
                         msgDiv.ondblclick = function() {{
-                            console.log("DOUBLE_CLICK_IDX:" + idx);
+                            notifyDoubleClick(idx);
                         }};
                         msgDiv.style.cursor = "pointer";
                         msgDiv.title = "Double-click to open in new window";
@@ -503,8 +712,7 @@ class AIChatPanel(QWidget):
                     let parsedText = renderMarkdownSafe(text);
                     let html = `<b>AI Summary:</b><br><div class='summary-section'>${{parsedText}}</div>`;
                     if (idx !== undefined && idx !== null) {{
-                        html += `<br><button data-action="edit" data-idx="${{idx}}" style="margin-top:8px; margin-right:8px; padding:4px 8px; font-size:9pt; cursor:pointer; background-color:#e1e1e1; border:1px solid #ccc; border-radius:4px;">Edit Response</button>`;
-                        html += `<button data-action="append" data-idx="${{idx}}" style="margin-top:8px; padding:4px 8px; font-size:9pt; cursor:pointer; background-color:#e1e1e1; border:1px solid #ccc; border-radius:4px;">Append to PDF</button>`;
+                        html += '<br>' + getEditButtonHtml(idx) + getAppendButtonHtml(idx);
                     }}
                     
                     msgDiv.innerHTML = html;
@@ -515,6 +723,9 @@ class AIChatPanel(QWidget):
                 function updateMessage(idx, newText, msgType) {{
                     const msgDiv = document.getElementById('msg-' + idx);
                     if (!msgDiv) return;
+                    
+                    const numIdx = parseInt(idx);
+                    appendedIndices.delete(numIdx);
                     
                     let html = '<b>AI' + (msgType === "chat" ? "" : " " + msgType.charAt(0).toUpperCase() + msgType.slice(1)) + ':</b><br>';
                     let parsedText = renderMarkdownSafe(newText);
@@ -527,8 +738,7 @@ class AIChatPanel(QWidget):
                         html += parsedText;
                     }}
                     
-                    html += `<br><button data-action="edit" data-idx="${{idx}}" style="margin-top:8px; margin-right:8px; padding:4px 8px; font-size:9pt; cursor:pointer; background-color:#e1e1e1; border:1px solid #ccc; border-radius:4px;">Edit Response</button>`;
-                    html += `<button data-action="append" data-idx="${{idx}}" style="margin-top:8px; padding:4px 8px; font-size:9pt; cursor:pointer; background-color:#e1e1e1; border:1px solid #ccc; border-radius:4px;">Append to PDF</button>`;
+                    html += '<br>' + getEditButtonHtml(idx) + getAppendButtonHtml(idx);
                     
                     msgDiv.innerHTML = html;
                     triggerMathJax();
@@ -556,28 +766,28 @@ class AIChatPanel(QWidget):
         self.web_view.page().runJavaScript(js)
         
     def add_ai_message(self, message: str, original_prompt: str = "", display_title: str = ""):
-        self.hide_loading()
+        self.set_generating_state(False)
         idx = len(self.raw_messages)
         self.raw_messages.append({"action": "chat", "content": message, "prompt": original_prompt, "title": display_title})
         js = f"addMessage('ai', {json.dumps(message)}, true, {idx});"
         self.web_view.page().runJavaScript(js)
 
     def add_explain_message(self, parts: list, original_prompt: str = "", display_title: str = ""):
-        self.hide_loading()
+        self.set_generating_state(False)
         idx = len(self.raw_messages)
         self.raw_messages.append({"action": "explain", "content": parts, "prompt": original_prompt, "title": display_title})
         js = f"addExplainMessage({json.dumps(parts)}, {idx});"
         self.web_view.page().runJavaScript(js)
         
     def add_discuss_message(self, text: str, original_prompt: str = "", display_title: str = ""):
-        self.hide_loading()
+        self.set_generating_state(False)
         idx = len(self.raw_messages)
         self.raw_messages.append({"action": "discuss", "content": text, "prompt": original_prompt, "title": display_title})
         js = f"addDiscussMessage({json.dumps(text)}, {idx});"
         self.web_view.page().runJavaScript(js)
 
     def add_summary_message(self, text: str, original_prompt: str = "", display_title: str = ""):
-        self.hide_loading()
+        self.set_generating_state(False)
         idx = len(self.raw_messages)
         self.raw_messages.append({"action": "summary", "content": text, "prompt": original_prompt, "title": display_title})
         js = f"addSummaryMessage({json.dumps(text)}, {idx});"
@@ -589,12 +799,12 @@ class AIChatPanel(QWidget):
         self.web_view.page().runJavaScript(js)
 
     def add_system_error(self, error_msg: str, allow_retry: bool = True):
-        self.hide_loading()
+        self.set_generating_state(False)
         js = f"addSystemError({json.dumps(error_msg)}, {json.dumps(allow_retry)});"
         self.web_view.page().runJavaScript(js)
 
     def start_countdown(self, seconds: int):
-        self.hide_loading()
+        self.set_generating_state(False)
         js = f"startCountdown({seconds});"
         self.web_view.page().runJavaScript(js)
 
@@ -625,6 +835,11 @@ class AIChatPanel(QWidget):
             msg_data = self.raw_messages[idx]
             self.append_requested.emit(msg_data)
             
+    def set_all_append_disabled(self, disabled: bool):
+        import json
+        js = f"setAllAppendDisabled({json.dumps(disabled)});"
+        self.web_view.page().runJavaScript(js)
+
     def clear_chat(self):
         self.raw_messages = []
         self.web_view.setHtml(self._get_html_template(), get_assets_base_url())

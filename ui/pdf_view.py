@@ -461,7 +461,7 @@ class PDFView(QGraphicsView):
             self.viewport().setCursor(Qt.CursorShape.PointingHandCursor)
             self.setCursor(Qt.CursorShape.PointingHandCursor)
 
-    def update_theme(self, app_style: str = "Native macOS", color_mode: str = "Light"):
+    def update_theme(self, app_style: str = "Native", color_mode: str = "Light"):
         from ui.theme_manager import ThemeManager
         self.setBackgroundBrush(ThemeManager.get_pdf_bg_color(app_style, color_mode))
         if hasattr(self, "annotation_bar") and self.annotation_bar:
@@ -712,7 +712,6 @@ class PDFView(QGraphicsView):
                 dlg.move(event.globalPos())
                 if dlg.exec() and dlg.get_text():
                     self.document.add_text_annotation(item.page_number, (local_x, local_y), dlg.get_text())
-                    self.document.save_document()
                     item.unload()
                     item.load()
                     self.annotation_changed.emit(item.page_number)
@@ -940,7 +939,6 @@ class PDFView(QGraphicsView):
             if len(self._freehand_stroke) > 1 and self.document:
                 item = self._freehand_item
                 self.document.add_ink_annotation(item.page_number, [self._freehand_stroke], color=(1.0, 0.9, 0.0), width=10, opacity=0.5)
-                self.document.save_document()
                 item.unload()
                 item.load()
                 self.annotation_changed.emit(item.page_number)
@@ -966,7 +964,6 @@ class PDFView(QGraphicsView):
             dlg.move(event.globalPos())
             if dlg.exec() and dlg.get_text() and self.document:
                 self.document.add_freetext_annotation(item.page_number, (x0, y0, x0 + w, y0 + h), dlg.get_text(), font_size=12)
-                self.document.save_document()
                 item.unload()
                 item.load()
                 self.annotation_changed.emit(item.page_number)
@@ -992,7 +989,6 @@ class PDFView(QGraphicsView):
                 _, line_rects = self.document.get_text_range_rects(item.page_number, p0, p1, words=cached_words)
                 if line_rects:
                     self.document.add_highlight_annotation(item.page_number, line_rects)
-                    self.document.save_document()
                     item.unload()
                     item.load()
                     self.annotation_changed.emit(item.page_number)

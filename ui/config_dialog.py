@@ -1,9 +1,12 @@
 import os
+import json
+import shiboken6
 from PySide6.QtWidgets import (
     QDialog, QVBoxLayout, QHBoxLayout, QFormLayout,
     QLabel, QLineEdit, QComboBox, QPushButton, QMessageBox,
     QFontComboBox, QSpinBox, QWidget, QFrame, QStackedWidget,
-    QToolButton, QButtonGroup, QTextEdit, QCheckBox
+    QToolButton, QButtonGroup, QTextEdit, QCheckBox,
+    QRadioButton, QFileDialog
 )
 from PySide6.QtCore import Qt, QSize, QByteArray, Signal, QThread
 from PySide6.QtGui import QFont, QIcon, QPixmap, QPainter, QColor
@@ -11,6 +14,8 @@ from PySide6.QtSvg import QSvgRenderer
 from backend.config_manager import ConfigManager
 from backend.logger import logger
 
+
+from ui.asset_loader import get_icon_path
 
 def get_tab_icon(icon_name: str, fallback_glyph: str, size: int = 24) -> QIcon:
     """
@@ -36,7 +41,7 @@ def get_tab_icon(icon_name: str, fallback_glyph: str, size: int = 24) -> QIcon:
 
     for ext in [".svg", ".png", ".jpg", ".jpeg", ".ico"]:
         for variant in name_variants:
-            candidates.append(os.path.join("icons", f"{variant}{ext}"))
+            candidates.append(get_icon_path(f"{variant}{ext}"))
 
     found_path = None
     for path in candidates:
@@ -127,8 +132,8 @@ class ModelFetcherThread(QThread):
     models_fetched = Signal(list)
     error_occurred = Signal(str)
 
-    def __init__(self, api_key: str):
-        super().__init__()
+    def __init__(self, api_key: str, parent=None):
+        super().__init__(parent)
         self.api_key = api_key
 
     def run(self):
@@ -149,16 +154,80 @@ class ModelFetcherThread(QThread):
             self.error_occurred.emit(str(e))
 
 
+class LocalModelFetcherThread(QThread):
+    models_fetched = Signal(list)
+    error_occurred = Signal(str)
+
+    def __init__(self, endpoint: str, parent=None):
+        super().__init__(parent)
+        self.endpoint = endpoint
+
+    def run(self):
+        try:
+            from backend.ai_assistant import ensure_local_ai_server, extract_ollama_base_url
+            import urllib.request
+            raw_endpoint = (self.endpoint or "").strip()
+            base_url = extract_ollama_base_url(raw_endpoint)
+            
+            # If targeting localhost Ollama, ensure it is running
+            if "localhost:11434" in base_url or "127.0.0.1:11434" in base_url:
+                ensure_local_ai_server(base_url, timeout_sec=4.0)
+
+            models = []
+            
+            # 1. Try Ollama native /api/tags
+            try:
+                req = urllib.request.Request(f"{base_url}/api/tags", headers={"User-Agent": "LLM_Qt_PDF"})
+                with urllib.request.urlopen(req, timeout=3) as resp:
+                    data = json.loads(resp.read().decode("utf-8"))
+                    models = [m.get("name", "") for m in data.get("models", []) if m.get("name")]
+            except Exception as e:
+                logger.debug(f"Failed to query {base_url}/api/tags: {e}")
+                
+            # 2. Try OpenAI-compatible /v1/models or /models
+            if not models:
+                for models_url in [f"{base_url}/v1/models", f"{base_url}/models"]:
+                    try:
+                        req = urllib.request.Request(models_url, headers={"User-Agent": "LLM_Qt_PDF"})
+                        with urllib.request.urlopen(req, timeout=3) as resp:
+                            data = json.loads(resp.read().decode("utf-8"))
+                            models = [m.get("id", "") for m in data.get("data", []) if m.get("id")]
+                            if models:
+                                break
+                    except Exception as e:
+                        logger.debug(f"Failed to query {models_url}: {e}")
+
+            if models:
+                self.models_fetched.emit(models)
+            else:
+                self.error_occurred.emit("No models found. Make sure Ollama is running and models are installed.")
+        except Exception as e:
+            self.error_occurred.emit(str(e))
+
+
+
 class ConfigDialog(QDialog):
     theme_preview_requested = Signal(str, str)
     
-    def __init__(self, parent=None, current_api_key="", initial_tab=0):
+    def __init__(self, parent=None, initial_tab=0, current_api_key=None):
         super().__init__(parent)
+        self.fetcher = None
+        self.local_fetcher = None
         self.setWindowTitle("Settings")
-        self.setFixedSize(500, 420)
+        self.setFixedSize(520, 480)
         
         self.config = ConfigManager()
-        self.api_key = current_api_key
+        self.key_was_changed = False
+        
+        # Read initial API key directly from keychain if not explicitly provided
+        if current_api_key is not None:
+            self._initial_api_key = current_api_key
+        else:
+            try:
+                import keyring
+                self._initial_api_key = keyring.get_password("AIPDFViewer", "api_key") or ""
+            except Exception:
+                self._initial_api_key = ""
         
         # Main layout
         main_layout = QVBoxLayout(self)
@@ -185,55 +254,54 @@ class ConfigDialog(QDialog):
         tab_bar_layout.addWidget(self.btn_general)
         tab_bar_layout.addWidget(self.btn_ai)
         tab_bar_layout.addWidget(self.btn_chatbox)
-        
         main_layout.addLayout(tab_bar_layout)
         
-        # 2. Subtle Divider Line
+        # Separator Line
         sep = QFrame()
         sep.setFrameShape(QFrame.Shape.HLine)
-        sep.setFrameShadow(QFrame.Shadow.Plain)
-        sep.setStyleSheet("border: none; border-top: 1px solid #d5d5da; margin-top: 2px; margin-bottom: 6px;")
+        sep.setFrameShadow(QFrame.Shadow.Sunken)
+        sep.setStyleSheet("background-color: #d1d1d6; max-height: 1px; margin-top: 2px; margin-bottom: 6px;")
         main_layout.addWidget(sep)
         
-        # 3. Stacked Pages
-        self.pages_stack = QStackedWidget()
-        
+        # 2. Content Pages via QStackedWidget
+        self.stack = QStackedWidget()
         self.page_general = self._create_general_page()
         self.page_ai = self._create_ai_page()
         self.page_chatbox = self._create_chatbox_page()
         
-        self.pages_stack.addWidget(self.page_general)
-        self.pages_stack.addWidget(self.page_ai)
-        self.pages_stack.addWidget(self.page_chatbox)
+        self.stack.addWidget(self.page_general)
+        self.stack.addWidget(self.page_ai)
+        self.stack.addWidget(self.page_chatbox)
         
-        self.tab_group.idClicked.connect(self.pages_stack.setCurrentIndex)
+        main_layout.addWidget(self.stack)
         
+        # Switch tab signal
+        self.tab_group.idClicked.connect(self.stack.setCurrentIndex)
+        
+        # Initial Tab Selection
         if initial_tab == 1:
             self.btn_ai.setChecked(True)
-            self.pages_stack.setCurrentIndex(1)
+            self.stack.setCurrentIndex(1)
         elif initial_tab == 2:
             self.btn_chatbox.setChecked(True)
-            self.pages_stack.setCurrentIndex(2)
+            self.stack.setCurrentIndex(2)
         else:
             self.btn_general.setChecked(True)
-            self.pages_stack.setCurrentIndex(0)
-        
-        main_layout.addWidget(self.pages_stack, stretch=1)
-        
-        # 4. Bottom Action Buttons (Cancel / Save)
+            self.stack.setCurrentIndex(0)
+            
+        # 3. Bottom Action Buttons (Cancel / Save)
         btn_layout = QHBoxLayout()
         btn_layout.setContentsMargins(0, 8, 0, 0)
-        btn_layout.setSpacing(10)
         
         self.cancel_btn = QPushButton("Cancel")
         self.cancel_btn.setStyleSheet("""
             QPushButton {
                 background-color: #e5e5ea;
-                color: #000000;
+                color: #1c1c1e;
                 font-weight: 500;
                 border: none;
                 border-radius: 6px;
-                padding: 6px 18px;
+                padding: 6px 16px;
                 min-width: 70px;
             }
             QPushButton:hover {
@@ -242,7 +310,8 @@ class ConfigDialog(QDialog):
         """)
         self.cancel_btn.clicked.connect(self.reject)
         
-        self.save_btn = QPushButton("Save")
+        self.save_btn = QPushButton("Save Settings")
+        self.save_btn.setDefault(True)
         self.save_btn.setStyleSheet("""
             QPushButton {
                 background-color: #007aff;
@@ -250,8 +319,8 @@ class ConfigDialog(QDialog):
                 font-weight: 600;
                 border: none;
                 border-radius: 6px;
-                padding: 6px 18px;
-                min-width: 70px;
+                padding: 6px 16px;
+                min-width: 90px;
             }
             QPushButton:hover {
                 background-color: #0062cc;
@@ -274,7 +343,7 @@ class ConfigDialog(QDialog):
         # App Info Section
         info_label = QLabel("<b>AI PDF Viewer</b>")
         info_label.setStyleSheet("font-size: 11pt; color: #1c1c1e;")
-        desc_label = QLabel("Local AI-assisted scientific PDF reader powered by Google Gemini.")
+        desc_label = QLabel("Local AI-assisted scientific PDF reader powered by Gemini and Ollama.")
         desc_label.setStyleSheet("color: #636366; font-size: 9.5pt;")
         
         layout.addWidget(info_label)
@@ -288,7 +357,7 @@ class ConfigDialog(QDialog):
         
         # Style Selector
         self.style_combo = QComboBox()
-        self.style_combo.addItems(["Native macOS", "Adobe Acrobat", "Minimalist"])
+        self.style_combo.addItems(["Native", "Adobe Acrobat", "Minimalist"])
         idx = self.style_combo.findText(self.config.app_style)
         if idx >= 0:
             self.style_combo.setCurrentIndex(idx)
@@ -322,16 +391,57 @@ class ConfigDialog(QDialog):
         page = QWidget()
         layout = QVBoxLayout(page)
         layout.setContentsMargins(12, 10, 12, 10)
-        layout.setSpacing(14)
+        layout.setSpacing(12)
+        
+        # 1. Top 2-Part Provider Selection Frame
+        provider_frame = QFrame()
+        provider_frame.setStyleSheet("""
+            QFrame {
+                background-color: #f2f2f7;
+                border: 1px solid #d1d1d6;
+                border-radius: 8px;
+                padding: 4px;
+            }
+        """)
+        provider_layout = QHBoxLayout(provider_frame)
+        provider_layout.setContentsMargins(8, 4, 8, 4)
+        provider_layout.setSpacing(20)
+        
+        self.provider_group = QButtonGroup(self)
+        self.radio_cloud = QRadioButton("Cloud (Google Gemini)")
+        self.radio_local = QRadioButton("Local Model (Ollama / GGUF)")
+        
+        self.provider_group.addButton(self.radio_cloud)
+        self.provider_group.addButton(self.radio_local)
+        
+        if self.config.ai_provider == "local":
+            self.radio_local.setChecked(True)
+        else:
+            self.radio_cloud.setChecked(True)
+            
+        self.radio_cloud.toggled.connect(self._on_provider_toggled)
+        self.radio_local.toggled.connect(self._on_provider_toggled)
+        
+        provider_layout.addWidget(self.radio_cloud)
+        provider_layout.addWidget(self.radio_local)
+        provider_layout.addStretch()
+        
+        layout.addWidget(provider_frame)
+        
+        # 2. Container for Cloud (Gemini) Options
+        self.cloud_container = QWidget()
+        cloud_layout = QVBoxLayout(self.cloud_container)
+        cloud_layout.setContentsMargins(0, 0, 0, 0)
+        cloud_layout.setSpacing(12)
         
         # API Key Section
         key_group = QVBoxLayout()
         key_header = QLabel("<b>Google Gemini API Key</b>")
-        key_header.setStyleSheet("font-size: 10.5pt; color: #1c1c1e;")
+        key_header.setStyleSheet("font-size: 10pt; color: #1c1c1e;")
         key_group.addWidget(key_header)
         
         key_input_layout = QHBoxLayout()
-        self.key_input = QLineEdit(self.api_key)
+        self.key_input = QLineEdit(self._initial_api_key)
         self.key_input.setEchoMode(QLineEdit.EchoMode.Password)
         self.key_input.setPlaceholderText("Enter your Gemini API key...")
         self.key_input.textChanged.connect(self._on_key_changed)
@@ -362,13 +472,12 @@ class ConfigDialog(QDialog):
         key_hint = QLabel("Your API key is securely saved in your macOS Keychain.")
         key_hint.setStyleSheet("color: #8e8e93; font-size: 8.5pt;")
         key_group.addWidget(key_hint)
+        cloud_layout.addLayout(key_group)
         
-        layout.addLayout(key_group)
-        
-        # Model Selection Section
+        # Cloud Model Selection Section
         model_group = QVBoxLayout()
-        model_header = QLabel("<b>Default AI Model</b>")
-        model_header.setStyleSheet("font-size: 10.5pt; color: #1c1c1e;")
+        model_header = QLabel("<b>Default Cloud Model</b>")
+        model_header.setStyleSheet("font-size: 10pt; color: #1c1c1e;")
         model_group.addWidget(model_header)
         
         self.model_combo = QComboBox()
@@ -378,12 +487,142 @@ class ConfigDialog(QDialog):
         else:
             self.model_combo.addItem("gemini-flash-lite-latest (Default)")
         model_group.addWidget(self.model_combo)
+        cloud_layout.addLayout(model_group)
         
-        layout.addLayout(model_group)
+        layout.addWidget(self.cloud_container)
         
-        self._on_key_changed(self.api_key)
+        # 3. Container for Local Model Options
+        self.local_container = QWidget()
+        local_layout = QVBoxLayout(self.local_container)
+        local_layout.setContentsMargins(0, 0, 0, 0)
+        local_layout.setSpacing(10)
+        
+        # Local Model Dropdown Selection
+        local_model_group = QVBoxLayout()
+        local_model_header = QLabel("<b>Installed Local Model (Ollama)</b>")
+        local_model_header.setStyleSheet("font-size: 10pt; color: #1c1c1e;")
+        local_model_group.addWidget(local_model_header)
+        
+        local_model_layout = QHBoxLayout()
+        self.local_model_combo = QComboBox()
+        current_local = self.config.local_model_name or "mistral-nemo:latest"
+        self.local_model_combo.addItem(current_local)
+        
+        self.fetch_local_btn = QPushButton("Fetch Local Models")
+        self.fetch_local_btn.setStyleSheet("""
+            QPushButton {
+                background-color: #007aff;
+                color: #ffffff;
+                font-weight: 500;
+                border: none;
+                border-radius: 5px;
+                padding: 5px 12px;
+            }
+            QPushButton:hover {
+                background-color: #0062cc;
+            }
+            QPushButton:disabled {
+                background-color: #b0bec5;
+            }
+        """)
+        self.fetch_local_btn.clicked.connect(self.fetch_local_models)
+        
+        local_model_layout.addWidget(self.local_model_combo)
+        local_model_layout.addWidget(self.fetch_local_btn)
+        local_model_group.addLayout(local_model_layout)
+
+        self.local_status_label = QLabel("")
+        self.local_status_label.setStyleSheet("color: #8e8e93; font-size: 8.5pt;")
+        local_model_group.addWidget(self.local_status_label)
+
+        local_layout.addLayout(local_model_group)
+        
+        # Local Endpoint Form
+        local_form = QFormLayout()
+        local_form.setSpacing(8)
+        local_form.setLabelAlignment(Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter)
+        
+        self.endpoint_input = QLineEdit(self.config.local_endpoint_url or "http://localhost:11434/v1")
+        self.endpoint_input.setPlaceholderText("http://localhost:11434/v1 (Ollama / Local Server)")
+        local_form.addRow("Server URL:", self.endpoint_input)
+
+        self.timeout_spin = QSpinBox()
+        self.timeout_spin.setRange(1, 30)
+        self.timeout_spin.setSingleStep(1)
+        current_sec = int(getattr(self.config, "local_timeout_sec", 300))
+        self.timeout_spin.setValue(max(1, min(30, round(current_sec / 60))))
+        self.timeout_spin.setSuffix(" min")
+        self.timeout_spin.setToolTip("Maximum minutes to wait for local model inference before timing out.")
+        local_form.addRow("Timeout:", self.timeout_spin)
+
+        timeout_hint = QLabel("Higher timeout (e.g. 5–10 min) recommended for 12B+ models and long documents.")
+        timeout_hint.setStyleSheet("color: #8e8e93; font-size: 8.5pt;")
+        local_form.addRow("", timeout_hint)
+
+        local_layout.addLayout(local_form)
+        
+        layout.addWidget(self.local_container)
+        
+        self._on_provider_toggled()
+        self._on_key_changed(self._initial_api_key)
+        
+        # Auto fetch local models if local provider selected
+        if self.config.ai_provider == "local":
+            self.fetch_local_models()
+            
         layout.addStretch()
         return page
+
+    def _on_provider_toggled(self):
+        is_cloud = self.radio_cloud.isChecked()
+        self.cloud_container.setVisible(is_cloud)
+        self.local_container.setVisible(not is_cloud)
+        if not is_cloud:
+            self.fetch_local_models()
+
+    def fetch_local_models(self):
+        endpoint = self.endpoint_input.text().strip() or "http://localhost:11434/v1"
+        self.fetch_local_btn.setText("Fetching...")
+        self.fetch_local_btn.setEnabled(False)
+        self.local_status_label.setStyleSheet("color: #8e8e93; font-size: 8.5pt;")
+        self.local_status_label.setText("Connecting to local model server...")
+        
+        try:
+            if self.local_fetcher is not None and shiboken6.isValid(self.local_fetcher) and self.local_fetcher.isRunning():
+                self.local_fetcher.wait(300)
+        except Exception:
+            pass
+
+        self.local_fetcher = LocalModelFetcherThread(endpoint, parent=self)
+        self.local_fetcher.models_fetched.connect(self._on_local_models_fetched)
+        self.local_fetcher.error_occurred.connect(self._on_local_fetch_error)
+        self.local_fetcher.start()
+
+    def _on_local_models_fetched(self, models: list):
+        self.fetch_local_btn.setText("Fetch Local Models")
+        self.fetch_local_btn.setEnabled(True)
+        if models:
+            current = self.config.local_model_name
+            self.local_model_combo.clear()
+            self.local_model_combo.addItems(models)
+            
+            idx = self.local_model_combo.findText(current)
+            if idx >= 0:
+                self.local_model_combo.setCurrentIndex(idx)
+            else:
+                self.local_model_combo.setCurrentIndex(0)
+            
+            self.local_status_label.setStyleSheet("color: #34c759; font-size: 8.5pt;")
+            self.local_status_label.setText(f"✓ Found {len(models)} installed model(s)")
+        else:
+            self.local_status_label.setStyleSheet("color: #ff9500; font-size: 8.5pt;")
+            self.local_status_label.setText("No models found. Run 'ollama pull <model>' to install.")
+
+    def _on_local_fetch_error(self, err_msg: str):
+        self.fetch_local_btn.setText("Fetch Local Models")
+        self.fetch_local_btn.setEnabled(True)
+        self.local_status_label.setStyleSheet("color: #ff3b30; font-size: 8.5pt;")
+        self.local_status_label.setText(f"⚠️ {err_msg}")
 
     def _create_chatbox_page(self) -> QWidget:
         page = QWidget()
@@ -456,10 +695,15 @@ class ConfigDialog(QDialog):
         self.fetch_btn.setEnabled(False)
         self.model_combo.clear()
         
-        self.fetcher = ModelFetcherThread(api_key)
+        try:
+            if self.fetcher is not None and shiboken6.isValid(self.fetcher) and self.fetcher.isRunning():
+                self.fetcher.wait(300)
+        except Exception:
+            pass
+
+        self.fetcher = ModelFetcherThread(api_key, parent=self)
         self.fetcher.models_fetched.connect(self._on_models_fetched)
         self.fetcher.error_occurred.connect(self._on_fetch_error)
-        self.fetcher.finished.connect(self.fetcher.deleteLater)
         self.fetcher.start()
 
     def _on_models_fetched(self, model_names: list):
@@ -480,20 +724,61 @@ class ConfigDialog(QDialog):
         QMessageBox.critical(self, "Error", f"Failed to fetch models:\n{err_msg}")
         self.model_combo.addItem(self.config.model_name)
 
+    def done(self, r):
+        try:
+            if self.fetcher is not None and shiboken6.isValid(self.fetcher) and self.fetcher.isRunning():
+                self.fetcher.wait(500)
+        except Exception:
+            pass
+        try:
+            if self.local_fetcher is not None and shiboken6.isValid(self.local_fetcher) and self.local_fetcher.isRunning():
+                self.local_fetcher.wait(500)
+        except Exception:
+            pass
+        super().done(r)
+
     def accept(self):
-        self.api_key = self.key_input.text().strip()
+        new_key = self.key_input.text().strip()
+        if new_key != self._initial_api_key:
+            self.key_was_changed = True
+            try:
+                import keyring
+                if new_key:
+                    keyring.set_password("AIPDFViewer", "api_key", new_key)
+                else:
+                    try:
+                        keyring.delete_password("AIPDFViewer", "api_key")
+                    except Exception:
+                        pass
+            except Exception as e:
+                logger.error(f"Failed to save API key to keychain: {e}")
         
         self.config.app_style = self.style_combo.currentText()
         self.config.color_mode = self.mode_combo.currentText()
         
-        selected_model = self.model_combo.currentText().strip()
-        if selected_model and selected_model != "No models found":
-            self.config.model_name = selected_model
+        if self.radio_local.isChecked():
+            self.config.ai_provider = "local"
+            self.config.local_endpoint_url = self.endpoint_input.text().strip()
+            self.config.local_model_name = self.local_model_combo.currentText().strip()
+            self.config.local_timeout_sec = self.timeout_spin.value() * 60
+        else:
+            self.config.ai_provider = "cloud"
+            selected_model = self.model_combo.currentText().strip()
+            if selected_model and selected_model != "No models found":
+                self.config.model_name = selected_model
             
         self.config.ai_font_family = self.font_combo.currentFont().family()
         self.config.ai_font_size = self.size_spin.value()
         
         super().accept()
 
+    @property
+    def api_key(self) -> str:
+        """Returns the current API key entered in the key input field."""
+        if hasattr(self, "key_input") and self.key_input is not None:
+            return self.key_input.text().strip()
+        return getattr(self, "_initial_api_key", "")
+
 
 SettingsDialog = ConfigDialog
+
