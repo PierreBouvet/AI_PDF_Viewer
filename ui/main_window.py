@@ -316,6 +316,8 @@ class StartupTaskThread(QThread):
         except Exception as e:
             self.error.emit(f"Failed to rank models at startup: {e}")
 
+from PySide6.QtWidgets import QWidget
+
 class MainWindow(QMainWindow):
     def __init__(self):
         super().__init__()
@@ -465,6 +467,20 @@ class MainWindow(QMainWindow):
         config_action.clicked.connect(self.open_config)
         self.toolbar.addWidget(config_action)
         
+        # Search functionality shortcut
+        self.search_shortcut = QShortcut(QKeySequence.StandardKey.Find, self)
+        self.search_shortcut.activated.connect(self.show_search)
+        
+        self.pdf_view.annotation_bar.search_closed.connect(self.hide_search)
+        self.pdf_view.annotation_bar.search_requested.connect(self.perform_search)
+        self.pdf_view.annotation_bar.next_requested.connect(self.next_search_result)
+        self.pdf_view.annotation_bar.prev_requested.connect(self.prev_search_result)
+        
+        self.current_search_query = ""
+        self.search_results_dict = {}
+        self.search_result_count = 0
+        self.current_search_index = -1
+        
         # Connect signals
         self.splitter.panel_states_changed.connect(self.update_pdf_only_button_state)
         self.chat_panel.message_sent.connect(self.handle_chat_message)
@@ -478,6 +494,7 @@ class MainWindow(QMainWindow):
         self.pdf_view.page_changed.connect(self.thumbnail_panel.set_current_page)
         self.pdf_view.text_action_requested.connect(self.handle_text_action)
         self.pdf_view.annotation_changed.connect(self.on_document_modified)
+        self.pdf_view.pdf_clicked.connect(self.hide_search)
         self.chat_panel.open_settings_requested.connect(self.open_ai_settings)
         self.chat_panel.retry_requested.connect(self.retry_last_action)
         self.chat_panel.stop_requested.connect(self.stop_ai_worker)
@@ -595,6 +612,53 @@ class MainWindow(QMainWindow):
         
     def open_ai_settings(self):
         self.open_config(initial_tab=1)
+
+    def show_search(self):
+        self.pdf_view.annotation_bar.show_search_ui()
+        
+    def hide_search(self):
+        self.pdf_view.annotation_bar.hide_search_ui()
+        self.pdf_view.clear_search_results()
+        self.search_results_dict = {}
+        self.search_result_count = 0
+        self.current_search_index = -1
+        
+    def perform_search(self, query):
+        if not query:
+            self.pdf_view.clear_search_results()
+            self.search_results_dict = {}
+            self.search_result_count = 0
+            self.current_search_index = -1
+            self._update_search_ui()
+            return
+            
+        self.current_search_query = query
+        self.search_results_dict = self.pdf_doc.search_text(query)
+        self.search_result_count = sum(len(rects) for rects in self.search_results_dict.values())
+        
+        if self.search_result_count > 0:
+            self.current_search_index = 0
+        else:
+            self.current_search_index = -1
+            
+        self._update_search_ui()
+        
+    def next_search_result(self):
+        if self.search_result_count > 0:
+            self.current_search_index = (self.current_search_index + 1) % self.search_result_count
+            self._update_search_ui()
+            
+    def prev_search_result(self):
+        if self.search_result_count > 0:
+            self.current_search_index = (self.current_search_index - 1) % self.search_result_count
+            self._update_search_ui()
+            
+    def _update_search_ui(self):
+        self.pdf_view.annotation_bar.update_matches(
+            self.current_search_index + 1 if self.search_result_count > 0 else 0,
+            self.search_result_count
+        )
+        self.pdf_view.highlight_search_results(self.search_results_dict, self.current_search_index)
 
     def open_config(self, initial_tab=0):
         old_provider = self.config.ai_provider

@@ -367,6 +367,7 @@ class PDFView(QGraphicsView):
     text_action_requested = Signal(str, str) # action_type, text
     annotation_completed = Signal()
     annotation_changed = Signal(int) # page_index
+    pdf_clicked = Signal()
 
     def __init__(self, parent=None):
         super().__init__(parent)
@@ -527,6 +528,8 @@ class PDFView(QGraphicsView):
         self.scene.clear()
         self.selection_items.clear()
         self.page_items.clear()
+        if hasattr(self, 'search_highlight_items'):
+            self.search_highlight_items.clear()
         self.current_selected_text = ""
         
         if not self.document or self.document.page_count == 0:
@@ -604,6 +607,50 @@ class PDFView(QGraphicsView):
             self.check_visibility()
             self.page_changed.emit(self.current_page)
             self._is_jumping = False
+
+    def clear_search_results(self):
+        if hasattr(self, 'search_highlight_items'):
+            for item in self.search_highlight_items:
+                if item.scene() == self.scene:
+                    self.scene.removeItem(item)
+            self.search_highlight_items.clear()
+        else:
+            self.search_highlight_items = []
+        self.current_search_results = []
+        self.active_search_index = -1
+
+    def highlight_search_results(self, page_rects_dict, active_index=-1):
+        self.clear_search_results()
+        
+        results = []
+        for page_num in sorted(page_rects_dict.keys()):
+            for rect in page_rects_dict[page_num]:
+                results.append((page_num, rect))
+                
+        self.current_search_results = results
+        self.active_search_index = active_index
+        
+        if not results:
+            return
+            
+        for i, (page_num, rect_coords) in enumerate(results):
+            if page_num < len(self.page_items):
+                page_item = self.page_items[page_num]
+                
+                x0, y0, x1, y1 = rect_coords
+                rect_item = QGraphicsRectItem(QRectF(x0, y0, x1 - x0, y1 - y0))
+                rect_item.setParentItem(page_item)
+                
+                if i == active_index:
+                    rect_item.setBrush(QColor(255, 150, 0, 100))
+                    rect_item.setPen(QPen(QColor(255, 150, 0, 200), 2))
+                    self.ensureVisible(rect_item, 50, 50)
+                else:
+                    rect_item.setBrush(QColor(255, 255, 0, 80))
+                    rect_item.setPen(QPen(Qt.GlobalColor.transparent))
+                
+                rect_item.setZValue(1.0)
+                self.search_highlight_items.append(rect_item)
             
     def scrollContentsBy(self, dx, dy):
         super().scrollContentsBy(dx, dy)
@@ -699,6 +746,7 @@ class PDFView(QGraphicsView):
         return None
 
     def mousePressEvent(self, event):
+        self.pdf_clicked.emit()
         scene_pos = self.mapToScene(event.pos())
         
         # 1. Note Tool

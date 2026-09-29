@@ -146,6 +146,19 @@ class PDFDocument:
             rect = fitz.Rect(*rect_coords)
             return page.get_text("text", clip=rect)
 
+    def search_text(self, query: str) -> dict:
+        """Search text across the whole document and return bounding boxes per page."""
+        results = {}
+        with self._lock:
+            if not self.doc or not query:
+                return results
+            for page_number in range(len(self.doc)):
+                page = self.doc[page_number]
+                rects = page.search_for(query)
+                if rects:
+                    results[page_number] = [(r.x0, r.y0, r.x1, r.y1) for r in rects]
+        return results
+
     def get_text_and_rects(self, page_number: int, rect_coords: Tuple[float, float, float, float]) -> Tuple[str, list]:
         """Extract text and the bounding boxes of individual words in a rectangular area."""
         with self._lock:

@@ -16,6 +16,10 @@ For the choice of models, no benchmarks have been developed so I can only give a
 
 For local models, the situation is a bit different, it mainly depends on your hardware. On a high end machine with a dedicated GPU, you'll be able to run large models with no performance penalty, on "average" laptops (e.g. a MacBook Pro with 16Gb of RAM), I have found Qwen 2.5 7B or Llama 3.1 8B to be good starting points. Expect however a significant speed difference between the cloud models (responds usually in less than a second - except when there's heavy traffic on google servers) and the local models (responds usually in several seconds, tens of seconds or minutes depending on prompt complexity). 
 
+## New in this version
+
+- Ability to search text within the PDF (with a standard "cmd+F" or "ctrl+F").
+
 ## Features
 
 - **Modern PDF Reader**: Render and navigate PDFs smoothly with thumbnail previews, built on top of `pymupdf`.
