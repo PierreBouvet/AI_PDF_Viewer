@@ -5,7 +5,7 @@ import tempfile
 from collections import OrderedDict
 import pymupdf as fitz
 from PySide6.QtGui import QImage
-from typing import List, Tuple, Optional
+from typing import List, Tuple, Optional, Dict, Any
 from backend.logger import logger
 
 class PDFDocument:
@@ -181,6 +181,71 @@ class PDFDocument:
                 return ""
             parts = [page.get_text("text") for page in self.doc]
             return "\n".join(parts)
+
+    def extract_structured_data(self, output_dir: Optional[str] = None, formats: List[str] = None) -> Dict[str, Any]:
+        """
+        Extract structured data using OpenDataLoader PDF for RAG/LLM ingestion.
+        This provides high-quality Markdown and JSON while preserving layout and tables.
+        Requires 'opendataloader-pdf' to be installed.
+        """
+        if formats is None:
+            formats = ["markdown", "json"]
+            
+        with self._lock:
+            if not self.file_path or not os.path.exists(self.file_path):
+                logger.error("No valid PDF file path available for extraction.")
+                return {"error": "No valid PDF file path."}
+            
+            try:
+                import opendataloader_pdf
+            except ImportError:
+                logger.error("opendataloader_pdf is not installed. Run: pip install opendataloader-pdf")
+                return {"error": "opendataloader_pdf is not installed."}
+                
+            try:
+                # Use a temporary directory if no output_dir is provided
+                is_temp_dir = False
+                if output_dir is None:
+                    output_dir = tempfile.mkdtemp(prefix="odl_extract_")
+                    is_temp_dir = True
+                    
+                logger.info(f"Running OpenDataLoader on {self.file_path}...")
+                opendataloader_pdf.convert(
+                    input_path=[self.file_path],
+                    output_dir=output_dir,
+                    format=formats
+                )
+                
+                result = {"output_dir": output_dir, "formats": {}}
+                
+                # OpenDataLoader creates files based on the input filename
+                base_name = os.path.splitext(os.path.basename(self.file_path))[0]
+                
+                for fmt in formats:
+                    expected_ext = f".{fmt}" if fmt != "markdown" else ".md"
+                    expected_file = os.path.join(output_dir, f"{base_name}{expected_ext}")
+                    
+                    if os.path.exists(expected_file):
+                        with open(expected_file, 'r', encoding='utf-8') as f:
+                            # Parse JSON automatically, read others as strings
+                            if fmt == "json":
+                                import json
+                                result["formats"][fmt] = json.load(f)
+                            else:
+                                result["formats"][fmt] = f.read()
+                    else:
+                        logger.warning(f"Expected OpenDataLoader output not found: {expected_file}")
+                            
+                # Clean up if we used a temporary directory
+                if is_temp_dir:
+                    shutil.rmtree(output_dir, ignore_errors=True)
+                    result["output_dir"] = None
+                    
+                return result
+                
+            except Exception as e:
+                logger.error(f"Error during OpenDataLoader extraction: {e}")
+                return {"error": str(e)}
 
     def is_ai_generated(self, page_index: int) -> bool:
         """Check if a specific page is AI generated using PDF metadata (with legacy fallback)."""

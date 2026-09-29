@@ -6,3 +6,6 @@ pytest>=8.0.0
 pytest-qt>=4.4.0
 pytest-mock>=3.14.0
 pyinstaller>=6.0.0
+markdown>=3.5.0
+matplotlib>=3.8.0
+cairosvg

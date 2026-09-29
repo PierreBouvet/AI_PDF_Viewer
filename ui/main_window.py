@@ -4,9 +4,10 @@ import tempfile
 import keyring
 from PySide6.QtWidgets import (QMainWindow, QSplitter, QSplitterHandle, QFileDialog, 
                                QToolBar, QMessageBox, QGraphicsView, QPushButton)
-from PySide6.QtCore import Qt, QThread, Signal, QObject, QTimer
-from PySide6.QtGui import QAction
-from PySide6.QtWebEngineCore import QWebEnginePage
+from PySide6.QtGui import QAction, QTextDocument
+from PySide6.QtPrintSupport import QPrinter
+from PySide6.QtCore import Qt, QThread, Signal, QObject, QTimer, QMarginsF
+from PySide6.QtGui import QPageLayout, QPageSize
 
 from ui.pdf_view import PDFView
 from ui.ai_chat_panel import AIChatPanel
@@ -221,6 +222,7 @@ class MainSplitter(QSplitter):
 
 class WorkerThread(QThread):
     result_ready = Signal(str, str, str, str)
+    chunk_ready = Signal(str)
     error = Signal(str)
     
     def __init__(self, ai_assistant, question, action_type="chat", use_direct=False, original_prompt="", display_title=""):
@@ -236,10 +238,13 @@ class WorkerThread(QThread):
         logger.debug(f"--- SENT TO AI ({self.action_type}) --- (Direct: {self.use_direct})\n{self.question}")
             
         try:
+            def callback(chunk):
+                self.chunk_ready.emit(chunk)
+
             if self.use_direct:
-                answer = self.ai_assistant.ask_direct(self.question)
+                answer = self.ai_assistant.ask_direct(self.question, stream_callback=callback)
             else:
-                answer = self.ai_assistant.ask(self.question)
+                answer = self.ai_assistant.ask(self.question, stream_callback=callback)
                 
             logger.debug(f"--- AI RESPONSE ({self.action_type}) ---\n{answer}")
                 
@@ -255,35 +260,27 @@ class PDFGenerator(QObject):
     
     def __init__(self, html: str, output_path: str):
         super().__init__()
-        self.page = QWebEnginePage(self)
+        self.html = html
         self.output_path = output_path
-        self._retries = 0
-        self._max_retries = 50 # 5 seconds max wait for MathJax
-        self.page.loadFinished.connect(self.on_load_finished)
-        self.page.pdfPrintingFinished.connect(self.on_pdf_printed)
-        self.page.setHtml(html, get_assets_base_url())
         
-    def check_status(self):
-        self._retries += 1
-        self.page.runJavaScript("window.status", 0, self.on_status)
-        
-    def on_status(self, res):
-        if res == "MATHJAX_DONE" or self._retries >= self._max_retries:
-            from PySide6.QtGui import QPageLayout, QPageSize
-            from PySide6.QtCore import QMarginsF
-            layout = QPageLayout(QPageSize(QPageSize.A4), QPageLayout.Portrait, QMarginsF(10, 10, 10, 10), QPageLayout.Millimeter)
-            self.page.printToPdf(self.output_path, layout)
-        else:
-            QTimer.singleShot(100, self.check_status)
-
-    def on_load_finished(self, ok):
-        if ok:
-            QTimer.singleShot(100, self.check_status)
-        else:
-            self.finished.emit(False)
+    def start(self):
+        try:
+            doc = QTextDocument()
+            doc.setHtml(self.html)
             
-    def on_pdf_printed(self, path, success):
-        self.finished.emit(success)
+            printer = QPrinter(QPrinter.PrinterMode.HighResolution)
+            printer.setOutputFormat(QPrinter.OutputFormat.PdfFormat)
+            printer.setOutputFileName(self.output_path)
+            
+            layout = QPageLayout(QPageSize(QPageSize.A4), QPageLayout.Portrait, QMarginsF(10, 10, 10, 10), QPageLayout.Millimeter)
+            printer.setPageLayout(layout)
+            
+            doc.print_(printer)
+            self.finished.emit(True)
+        except Exception as e:
+            from backend.logger import logger
+            logger.error(f"Failed to generate PDF via QTextDocument: {e}")
+            self.finished.emit(False)
 
 class IndexingThread(QThread):
     indexing_finished = Signal()
@@ -1021,6 +1018,22 @@ class MainWindow(QMainWindow):
             if not api_key:
                 self.chat_panel.add_system_message("Please configure Google API Key in Settings to enable AI features.")
                 return
+
+        # Check document size limits before indexing (CRIT-03)
+        from backend.ai_assistant import MAX_PDF_FILE_SIZE_BYTES, MAX_PDF_PAGES, LARGE_DOCUMENT_ERROR_MESSAGE
+        if self.pdf_doc and self.pdf_doc.doc:
+            file_path = self.pdf_doc.file_path
+            file_size = os.path.getsize(file_path) if file_path and os.path.exists(file_path) else 0
+            page_count = len(self.pdf_doc.doc)
+            if page_count > MAX_PDF_PAGES or file_size > MAX_PDF_FILE_SIZE_BYTES:
+                QMessageBox.warning(
+                    self,
+                    "Document Too Large",
+                    LARGE_DOCUMENT_ERROR_MESSAGE
+                )
+                self.chat_panel.set_index_status("unloaded")
+                self.chat_panel.show_index_button()
+                return
             
         if self._is_thread_running(self.indexer):
             thread = self.indexer
@@ -1068,7 +1081,18 @@ class MainWindow(QMainWindow):
         self.ai_assistant.clear_index()
         self.chat_panel.set_index_status("unloaded")
         self.chat_panel.show_index_button()
-        self.chat_panel.add_system_error(f"Indexing failed: {error_msg}", allow_retry=False)
+        self.chat_panel.add_system_message(f"Indexing failed: {error_msg}")
+
+        # Check if document exceeded size limit (CRIT-03)
+        from backend.ai_assistant import LARGE_DOCUMENT_ERROR_MESSAGE
+        if "unable to treat these large documents" in error_msg.lower():
+            QMessageBox.warning(
+                self,
+                "Document Too Large",
+                LARGE_DOCUMENT_ERROR_MESSAGE
+            )
+            self.statusBar().showMessage(LARGE_DOCUMENT_ERROR_MESSAGE, 10000)
+            return
         
         # Check if it's a quota error
         if "429" in error_msg or "Quota exceeded" in error_msg or "ResourceExhausted" in error_msg:
@@ -1133,6 +1157,7 @@ class MainWindow(QMainWindow):
         self.chat_panel.set_generating_state(True)
         self.worker = WorkerThread(self.ai_assistant, prompt, action_type, original_prompt=prompt, display_title=display_title)
         self.worker.result_ready.connect(self.on_ai_response)
+        self.worker.chunk_ready.connect(self.chat_panel.append_stream_chunk)
         self.worker.error.connect(self.on_worker_error)
         self.worker.finished.connect(self._on_worker_finished)
         self.worker.finished.connect(self.worker.deleteLater)
@@ -1160,6 +1185,7 @@ class MainWindow(QMainWindow):
             self.worker = WorkerThread(self.ai_assistant, text, "chat", original_prompt=text, display_title=display_title)
             
         self.worker.result_ready.connect(self.on_ai_response)
+        self.worker.chunk_ready.connect(self.chat_panel.append_stream_chunk)
         self.worker.error.connect(self.on_worker_error)
         self.worker.finished.connect(self._on_worker_finished)
         self.worker.finished.connect(self.worker.deleteLater)
@@ -1195,6 +1221,7 @@ class MainWindow(QMainWindow):
                 display_title=payload["display_title"]
             )
             self.worker.result_ready.connect(self.on_ai_response)
+            self.worker.chunk_ready.connect(self.chat_panel.append_stream_chunk)
             self.worker.error.connect(self.on_worker_error)
             self.worker.finished.connect(self._on_worker_finished)
             self.worker.finished.connect(self.worker.deleteLater)
@@ -1277,147 +1304,69 @@ class MainWindow(QMainWindow):
             QMessageBox.warning(self, "No PDF", "Cannot append to an unsaved PDF.")
             return
             
-        if self.active_generators:
-            logger.warning("PDF generation is already in progress.")
-            return
-            
-        file_path = current_file
+        title = msg_data.get("title", "")
+        prompt = msg_data.get("prompt", "")
+        content = msg_data.get("content", "")
         
-        if file_path:
-            title = msg_data.get("title", "")
-            prompt = msg_data.get("prompt", "")
-            content = msg_data.get("content", "")
+        markdown_content = ""
+        if title:
+            markdown_content += f"# {title}\n\n"
+        elif prompt:
+            markdown_content += f"# Prompt\n{prompt}\n\n# Response\n"
+        
+        if msg_data.get("action") == "explain" and isinstance(content, list):
+            titles = ["Rephrase", "Reasoning", "Contribution"]
+            for i, part in enumerate(content):
+                title = titles[i] if i < len(titles) else f"Section {i+1}"
+                markdown_content += f"## {title}\n{part}\n\n"
+        else:
+            markdown_content += f"{content}\n"
             
-            markdown_content = ""
-            if title:
-                markdown_content += f"# {title}\n\n"
-            elif prompt:
-                markdown_content += f"# Prompt\n{prompt}\n\n# Response\n"
+        import datetime
+        model = self.ai_assistant.get_active_model_name()
+        date_str = datetime.datetime.now().strftime("%d/%m/%Y")
+        footer = f"<p style='text-align: right; font-style: italic; color: grey; font-size: 9pt;'>Generated by {model} on {date_str}</p>"
+        
+        from backend.markdown_renderer import render_markdown
+        parsed_html = render_markdown(markdown_content) + footer
+        
+        from PySide6.QtGui import QFont, QTextDocument
+        doc = QTextDocument()
+        doc.setDefaultFont(QFont(self.ai_font_family, int(self.ai_font_size)))
+        doc.setHtml(parsed_html)
+        
+        import tempfile
+        import os
+        from PySide6.QtPrintSupport import QPrinter
+        from PySide6.QtGui import QPageSize
+        
+        fd, temp_path = tempfile.mkstemp(suffix=".pdf")
+        os.close(fd)
+        
+        printer = QPrinter(QPrinter.PrinterMode.HighResolution)
+        printer.setOutputFormat(QPrinter.OutputFormat.PdfFormat)
+        printer.setOutputFileName(temp_path)
+        printer.setPageSize(QPageSize(QPageSize.A4))
+        
+        doc.print_(printer)
+        
+        merged, err_msg = self.pdf_doc.append_pdf_file(temp_path, current_file)
+        if merged:
+            self.chat_panel.add_system_message(f"Successfully appended response and saved as {os.path.basename(current_file)}")
+            self.pdf_view.set_document(self.pdf_doc)
+            self.thumbnail_panel.set_document(self.pdf_doc, self.excluded_pages, self.included_pages)
+            last_page_idx = self.pdf_doc.page_count - 1
+            if last_page_idx >= 0:
+                self.pdf_view.set_current_page(last_page_idx)
+        else:
+            self.statusBar().showMessage(f"Failed to append PDF: {err_msg}", 10000)
+            self.chat_panel.add_system_message("Failed to append the generated page to the PDF.")
             
-            if msg_data.get("action") == "explain" and isinstance(content, list):
-                titles = ["Rephrase", "Reasoning", "Contribution"]
-                for i, part in enumerate(content):
-                    title = titles[i] if i < len(titles) else f"Section {i+1}"
-                    markdown_content += f"## {title}\n{part}\n\n"
-            else:
-                markdown_content += f"{content}\n"
-                
-            import json
-            import tempfile
-            import datetime
-            import html as html_mod
-            
-            model = self.ai_assistant.get_active_model_name()
-            if self.ai_assistant.provider == "local":
-                model_display = f"{model} (Local)"
-            else:
-                model_display = model
-            date_str = datetime.datetime.now().strftime("%d/%m/%Y")
-            
-            safe_font = html_mod.escape(str(self.ai_font_family).replace('"', '\\"'))
-            safe_model = html_mod.escape(str(model_display))
-            safe_font_size = int(self.ai_font_size) if str(self.ai_font_size).isdigit() else 11
-            safe_date_str = html_mod.escape(date_str)
-            
-            html = f"""
-            <!DOCTYPE html>
-            <html>
-            <head>
-            <meta charset="utf-8">
-            <meta http-equiv="Content-Security-Policy" content="default-src 'self' 'unsafe-inline' 'unsafe-eval' data: blob:;">
-            <script src="marked.min.js"></script>
-            <script src="purify.min.js"></script>
-            <script>
-            window.MathJax = {{
-                tex: {{ inlineMath: [['$', '$'], ['\\\\\\\\(', '\\\\\\\\)']], displayMath: [['$$', '$$'], ['\\\\\\\\[', '\\\\\\\\]']], processEscapes: true }},
-                startup: {{
-                    pageReady: () => {{
-                        return MathJax.startup.defaultPageReady().then(() => {{
-                            window.status = "MATHJAX_DONE";
-                        }});
-                    }}
-                }}
-            }};
-            </script>
-            <script src="tex-mml-chtml.js"></script>
-            <style>
-            body {{ font-family: "{safe_font}", sans-serif; font-size: {safe_font_size}pt; padding: 10px; }}
-            .footer {{
-                text-align: right;
-                font-style: italic;
-                color: grey;
-                font-size: 9pt;
-            }}
-            .ai-tag {{
-                color: transparent; 
-                font-size: 1px; 
-                user-select: none;
-            }}
-            @media print {{
-                .footer {{
-                    position: fixed;
-                    bottom: 0;
-                    right: 0;
-                }}
-                .ai-tag {{
-                    position: fixed;
-                    bottom: 0;
-                    left: 0;
-                }}
-                body {{
-                    padding-bottom: 20mm;
-                }}
-            }}
-            </style>
-            </head>
-            <body>
-            <div id="content"></div>
-            <div class="ai-tag">[[AI_GENERATED_PAGE]]</div>
-            <div class="footer">Generated by {safe_model} on {safe_date_str}</div>
-            <script>
-            const md = {json.dumps(markdown_content)};
-            const parsed = (window.marked && window.DOMPurify) ? DOMPurify.sanitize(marked.parse(md)) : (window.DOMPurify ? DOMPurify.sanitize(md) : md);
-            document.getElementById('content').innerHTML = parsed;
-            </script>
-            </body>
-            </html>
-            """
-            
-            fd, temp_path = tempfile.mkstemp(suffix=".pdf")
-            os.close(fd)
-            
-            self.chat_panel.add_system_message("Generating PDF with MathJax support, please wait...")
-            
-            self.pdf_generator = PDFGenerator(html, temp_path)
-            self.active_generators.add(self.pdf_generator)
-            generator = self.pdf_generator
-            
-            def on_pdf_ready(success):
-                self.active_generators.discard(generator)
-                self.chat_panel.set_all_append_disabled(False)
-                if success:
-                    merged, err_msg = self.pdf_doc.append_pdf_file(temp_path, file_path)
-                    if merged:
-                        self.chat_panel.add_system_message(f"Successfully appended response and saved as {os.path.basename(file_path)}")
-                        self.pdf_view.set_document(self.pdf_doc)
-                        self.thumbnail_panel.set_document(self.pdf_doc, self.excluded_pages, self.included_pages)
-                        last_page_idx = self.pdf_doc.page_count - 1
-                        if last_page_idx >= 0:
-                            self.pdf_view.set_current_page(last_page_idx)
-                    else:
-                        self.statusBar().showMessage(f"Failed to append PDF: {err_msg}", 10000)
-                        self.chat_panel.add_system_message("Failed to append the generated page to the PDF.")
-                else:
-                    self.statusBar().showMessage("Failed to generate PDF from markdown.", 10000)
-                    self.chat_panel.add_system_message("Failed to generate PDF from markdown.")
-                    
-                if os.path.exists(temp_path):
-                    try:
-                        os.remove(temp_path)
-                    except:
-                        pass
-            
-            generator.finished.connect(on_pdf_ready)
+        if os.path.exists(temp_path):
+            try:
+                os.remove(temp_path)
+            except:
+                pass
 
     def add_log(self, message: str):
         from datetime import datetime

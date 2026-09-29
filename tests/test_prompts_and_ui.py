@@ -578,6 +578,35 @@ def test_chat_panel_time_estimation(qtbot, monkeypatch):
     assert "Send (~" in panel.send_btn.text()
 
 
+def test_main_window_large_pdf_error_window(qtbot):
+    from ui.main_window import MainWindow
+    from backend.ai_assistant import LARGE_DOCUMENT_ERROR_MESSAGE, MAX_PDF_PAGES
+    from unittest.mock import MagicMock, patch
+    from PySide6.QtWidgets import QMessageBox
+
+    window = MainWindow()
+    qtbot.addWidget(window)
+
+    # 1. Test on_indexing_error with large document error message
+    with patch.object(QMessageBox, "warning") as mock_warn:
+        window.on_indexing_error(LARGE_DOCUMENT_ERROR_MESSAGE)
+        assert mock_warn.called
+        assert mock_warn.call_args[0][1] == "Document Too Large"
+        assert mock_warn.call_args[0][2] == LARGE_DOCUMENT_ERROR_MESSAGE
+
+    # 2. Test index_current_document with document exceeding page count
+    window.pdf_doc = MagicMock()
+    window.pdf_doc.doc = [MagicMock()] * (MAX_PDF_PAGES + 1)
+    window.pdf_doc.file_path = "/path/to/large.pdf"
+
+    with patch.object(QMessageBox, "warning") as mock_warn:
+        window.index_current_document()
+        assert mock_warn.called
+        assert mock_warn.call_args[0][1] == "Document Too Large"
+        assert mock_warn.call_args[0][2] == LARGE_DOCUMENT_ERROR_MESSAGE
+
+
+
 
 
 

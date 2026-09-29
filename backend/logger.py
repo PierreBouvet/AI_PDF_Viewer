@@ -4,6 +4,13 @@ Centralized structured logger for AI PDF Viewer.
 import logging
 import os
 import sys
+import codecs
+
+if hasattr(sys.stdout, 'buffer'):
+    sys.stdout = codecs.getwriter('utf-8')(sys.stdout.buffer, 'replace')
+if hasattr(sys.stderr, 'buffer'):
+    sys.stderr = codecs.getwriter('utf-8')(sys.stderr.buffer, 'replace')
+
 
 def setup_logger(name: str = "AIPDFViewer") -> logging.Logger:
     logger = logging.getLogger(name)

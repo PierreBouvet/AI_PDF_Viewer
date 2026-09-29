@@ -1,15 +1,19 @@
 # -*- mode: python ; coding: utf-8 -*-
 
 
+from PyInstaller.utils.hooks import collect_data_files
+
+datas = [
+    ('icons', 'icons'),
+    ('assets', 'assets'),
+    ('custom_prompts.csv', '.'),
+]
+
 a = Analysis(
     ['main.py'],
     pathex=[],
     binaries=[],
-    datas=[
-        ('icons', 'icons'),
-        ('assets', 'assets'),
-        ('custom_prompts.csv', '.'),
-    ],
+    datas=datas,
     hiddenimports=[
         'PySide6.QtSvg',
         'PySide6.QtSvgWidgets',

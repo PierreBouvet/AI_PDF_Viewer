@@ -177,7 +177,7 @@ class LocalModelFetcherThread(QThread):
             
             # 1. Try Ollama native /api/tags
             try:
-                req = urllib.request.Request(f"{base_url}/api/tags", headers={"User-Agent": "LLM_Qt_PDF"})
+                req = urllib.request.Request(f"{base_url}/api/tags", headers={"User-Agent": "AI_PDF_Viewer"})
                 with urllib.request.urlopen(req, timeout=3) as resp:
                     data = json.loads(resp.read().decode("utf-8"))
                     models = [m.get("name", "") for m in data.get("models", []) if m.get("name")]
@@ -188,7 +188,7 @@ class LocalModelFetcherThread(QThread):
             if not models:
                 for models_url in [f"{base_url}/v1/models", f"{base_url}/models"]:
                     try:
-                        req = urllib.request.Request(models_url, headers={"User-Agent": "LLM_Qt_PDF"})
+                        req = urllib.request.Request(models_url, headers={"User-Agent": "AI_PDF_Viewer"})
                         with urllib.request.urlopen(req, timeout=3) as resp:
                             data = json.loads(resp.read().decode("utf-8"))
                             models = [m.get("id", "") for m in data.get("data", []) if m.get("id")]

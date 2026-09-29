@@ -40,7 +40,6 @@ htmlcov/
 
 # Temp files
 temp.md
-BUILD.md
 *Audit.md
 .idea/
 .audit/
