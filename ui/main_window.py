@@ -326,6 +326,7 @@ class MainWindow(QMainWindow):
         self.setAcceptDrops(True)
         
         self.config = ConfigManager()
+        self.last_pdf_dir = getattr(self.config, "last_opened_dir", "") or ""
         saved_model_name = self.config.model_name
         self.ai_font_family = self.config.ai_font_family
         self.ai_font_size = self.config.ai_font_size
@@ -826,7 +827,8 @@ class MainWindow(QMainWindow):
     def open_pdf(self):
         if not self.maybe_save_prompt():
             return
-        file_path, _ = QFileDialog.getOpenFileName(self, "Open PDF", "", "PDF Files (*.pdf)")
+        initial_dir = self.last_pdf_dir if (self.last_pdf_dir and os.path.isdir(self.last_pdf_dir)) else ""
+        file_path, _ = QFileDialog.getOpenFileName(self, "Open PDF", initial_dir, "PDF Files (*.pdf)")
         if file_path:
             self.load_pdf(file_path)
 
@@ -1018,12 +1020,18 @@ class MainWindow(QMainWindow):
                 self.mode_action.setChecked(False)
                 self.toggle_layout_mode(False)
             
-            self.chat_panel.add_system_message(f"Loaded: {os.path.basename(file_path)}<br><br><b>Click the 'Index PDF' button below</b> to enable AI Q&A and text-selection features.")
+            pdf_name = os.path.basename(file_path)
+            self.setWindowTitle(pdf_name)
+            self.last_pdf_dir = os.path.dirname(os.path.abspath(file_path))
+            self.config.last_opened_dir = self.last_pdf_dir
+            
+            self.chat_panel.add_system_message(f"Loaded: {pdf_name}<br><br><b>Click the 'Index PDF' button below</b> to enable AI Q&A and text-selection features.")
             self.open_action.setText("Load another PDF")
             self.chat_panel.show_index_button()
-            self.add_log(f"PDF loaded: {os.path.basename(file_path)}")
+            self.add_log(f"PDF loaded: {pdf_name}")
             self.update_save_action_state()
         else:
+            self.setWindowTitle("AI-Enhanced PDF Viewer")
             self.update_save_action_state()
             QMessageBox.critical(self, "Error", "Failed to load PDF.")
 

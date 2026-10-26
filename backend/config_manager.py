@@ -107,6 +107,16 @@ class ConfigManager:
         self.settings.setValue("academic_timeout_sec", int(value))
         self.settings.sync()
 
+    @property
+    def last_opened_dir(self) -> str:
+        """Directory path of the last opened PDF."""
+        return str(self.settings.value("last_opened_dir", ""))
+
+    @last_opened_dir.setter
+    def last_opened_dir(self, value: str):
+        self.settings.setValue("last_opened_dir", value)
+        self.settings.sync()
+
 
 
     @property

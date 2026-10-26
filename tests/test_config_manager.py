@@ -109,3 +109,8 @@ def test_academic_ai_settings(clean_settings):
     assert clean_settings.academic_base_url == "https://custom-api.university.edu"
     assert clean_settings.academic_model_name == "gpt-5-mini"
     assert clean_settings.academic_timeout_sec == 180
+
+def test_last_opened_dir_setting(clean_settings):
+    assert clean_settings.last_opened_dir == ""
+    clean_settings.last_opened_dir = "/Users/test/Documents"
+    assert clean_settings.last_opened_dir == "/Users/test/Documents"
