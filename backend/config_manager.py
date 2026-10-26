@@ -65,12 +65,56 @@ class ConfigManager:
 
     @property
     def ai_provider(self) -> str:
-        """Active AI provider: 'cloud' (Google Gemini) or 'local' (Local Model)."""
+        """Active AI provider: 'cloud' (Google Gemini), 'academic' (Academic ChatGPT), or 'local' (Local Model)."""
         return str(self.settings.value("ai_provider", "cloud"))
 
     @ai_provider.setter
     def ai_provider(self, value: str):
         self.settings.setValue("ai_provider", value)
+        self.settings.sync()
+
+    @property
+    def academic_base_url(self) -> str:
+        """Academic API base URL (e.g., https://meduniwien-api.academic-ai.at)."""
+        return str(self.settings.value("academic_base_url", "https://meduniwien-api.academic-ai.at"))
+
+    @academic_base_url.setter
+    def academic_base_url(self, value: str):
+        self.settings.setValue("academic_base_url", value)
+        self.settings.sync()
+
+    @property
+    def academic_model_name(self) -> str:
+        """Academic model identifier name (e.g. gpt-4o)."""
+        return str(self.settings.value("academic_model_name", "gpt-4o"))
+
+    @academic_model_name.setter
+    def academic_model_name(self, value: str):
+        self.settings.setValue("academic_model_name", value)
+        self.settings.sync()
+
+    @property
+    def academic_timeout_sec(self) -> int:
+        """Timeout in seconds for academic AI model inference requests (default: 120s)."""
+        try:
+            val = int(self.settings.value("academic_timeout_sec", 120))
+            return max(10, min(1800, val))
+        except (ValueError, TypeError):
+            return 120
+
+    @academic_timeout_sec.setter
+    def academic_timeout_sec(self, value: int):
+        self.settings.setValue("academic_timeout_sec", int(value))
+        self.settings.sync()
+
+    @property
+    def last_opened_dir(self) -> str:
+        """Directory path of the last opened PDF."""
+        return str(self.settings.value("last_opened_dir", ""))
+
+    @last_opened_dir.setter
+    def last_opened_dir(self, value: str):
+        self.settings.setValue("last_opened_dir", value)
         self.settings.sync()
 
 

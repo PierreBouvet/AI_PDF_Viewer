@@ -606,14 +606,41 @@ def test_main_window_large_pdf_error_window(qtbot):
         assert mock_warn.call_args[0][2] == LARGE_DOCUMENT_ERROR_MESSAGE
 
 
+def test_load_pdf_updates_window_title_and_last_opened_dir(qtbot, tmp_path):
+    import pymupdf as fitz
+    from unittest.mock import patch
+    from PySide6.QtWidgets import QFileDialog
+    from ui.main_window import MainWindow
 
+    # Create dummy pdf in a subfolder
+    sub_dir = tmp_path / "test_folder"
+    sub_dir.mkdir()
+    pdf_path = sub_dir / "my_research_paper.pdf"
+    doc = fitz.open()
+    doc.new_page(width=400, height=400)
+    doc.save(str(pdf_path))
+    doc.close()
 
+    window = MainWindow()
+    qtbot.addWidget(window)
 
+    # Initial state
+    assert window.windowTitle() == "AI-Enhanced PDF Viewer"
+    assert window.open_action.text() == "Open PDF"
 
+    # Load PDF
+    window.load_pdf(str(pdf_path))
 
+    # Window title should now be the file basename
+    assert window.windowTitle() == "my_research_paper.pdf"
+    assert window.open_action.text() == "Load another PDF"
+    assert window.last_pdf_dir == str(sub_dir)
+    assert window.config.last_opened_dir == str(sub_dir)
 
-
-
-
-
-
+    # When opening file dialog via open_pdf ("Load another PDF"), it should point to sub_dir
+    with patch.object(QFileDialog, "getOpenFileName", return_value=("", "")) as mock_file_dialog:
+        window.open_pdf()
+        assert mock_file_dialog.called
+        args, kwargs = mock_file_dialog.call_args
+        # signature: (parent, caption, directory, filter)
+        assert args[2] == str(sub_dir)

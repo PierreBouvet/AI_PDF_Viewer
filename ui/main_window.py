@@ -316,6 +316,8 @@ class StartupTaskThread(QThread):
         except Exception as e:
             self.error.emit(f"Failed to rank models at startup: {e}")
 
+from PySide6.QtWidgets import QWidget
+
 class MainWindow(QMainWindow):
     def __init__(self):
         super().__init__()
@@ -324,6 +326,7 @@ class MainWindow(QMainWindow):
         self.setAcceptDrops(True)
         
         self.config = ConfigManager()
+        self.last_pdf_dir = getattr(self.config, "last_opened_dir", "") or ""
         saved_model_name = self.config.model_name
         self.ai_font_family = self.config.ai_font_family
         self.ai_font_size = self.config.ai_font_size
@@ -465,6 +468,20 @@ class MainWindow(QMainWindow):
         config_action.clicked.connect(self.open_config)
         self.toolbar.addWidget(config_action)
         
+        # Search functionality shortcut
+        self.search_shortcut = QShortcut(QKeySequence.StandardKey.Find, self)
+        self.search_shortcut.activated.connect(self.show_search)
+        
+        self.pdf_view.annotation_bar.search_closed.connect(self.hide_search)
+        self.pdf_view.annotation_bar.search_requested.connect(self.perform_search)
+        self.pdf_view.annotation_bar.next_requested.connect(self.next_search_result)
+        self.pdf_view.annotation_bar.prev_requested.connect(self.prev_search_result)
+        
+        self.current_search_query = ""
+        self.search_results_dict = {}
+        self.search_result_count = 0
+        self.current_search_index = -1
+        
         # Connect signals
         self.splitter.panel_states_changed.connect(self.update_pdf_only_button_state)
         self.chat_panel.message_sent.connect(self.handle_chat_message)
@@ -478,6 +495,7 @@ class MainWindow(QMainWindow):
         self.pdf_view.page_changed.connect(self.thumbnail_panel.set_current_page)
         self.pdf_view.text_action_requested.connect(self.handle_text_action)
         self.pdf_view.annotation_changed.connect(self.on_document_modified)
+        self.pdf_view.pdf_clicked.connect(self.hide_search)
         self.chat_panel.open_settings_requested.connect(self.open_ai_settings)
         self.chat_panel.retry_requested.connect(self.retry_last_action)
         self.chat_panel.stop_requested.connect(self.stop_ai_worker)
@@ -596,9 +614,58 @@ class MainWindow(QMainWindow):
     def open_ai_settings(self):
         self.open_config(initial_tab=1)
 
+    def show_search(self):
+        self.pdf_view.annotation_bar.show_search_ui()
+        
+    def hide_search(self):
+        self.pdf_view.annotation_bar.hide_search_ui()
+        self.pdf_view.clear_search_results()
+        self.search_results_dict = {}
+        self.search_result_count = 0
+        self.current_search_index = -1
+        
+    def perform_search(self, query):
+        if not query:
+            self.pdf_view.clear_search_results()
+            self.search_results_dict = {}
+            self.search_result_count = 0
+            self.current_search_index = -1
+            self._update_search_ui()
+            return
+            
+        self.current_search_query = query
+        self.search_results_dict = self.pdf_doc.search_text(query)
+        self.search_result_count = sum(len(rects) for rects in self.search_results_dict.values())
+        
+        if self.search_result_count > 0:
+            self.current_search_index = 0
+        else:
+            self.current_search_index = -1
+            
+        self._update_search_ui()
+        
+    def next_search_result(self):
+        if self.search_result_count > 0:
+            self.current_search_index = (self.current_search_index + 1) % self.search_result_count
+            self._update_search_ui()
+            
+    def prev_search_result(self):
+        if self.search_result_count > 0:
+            self.current_search_index = (self.current_search_index - 1) % self.search_result_count
+            self._update_search_ui()
+            
+    def _update_search_ui(self):
+        self.pdf_view.annotation_bar.update_matches(
+            self.current_search_index + 1 if self.search_result_count > 0 else 0,
+            self.search_result_count
+        )
+        self.pdf_view.highlight_search_results(self.search_results_dict, self.current_search_index)
+
     def open_config(self, initial_tab=0):
         old_provider = self.config.ai_provider
         old_model = self.config.model_name
+        old_academic_url = self.config.academic_base_url
+        old_academic_model = self.config.academic_model_name
         old_local_endpoint = self.config.local_endpoint_url
         old_local_name = self.config.local_model_name
         old_style = self.config.app_style
@@ -610,6 +677,8 @@ class MainWindow(QMainWindow):
         if dialog.exec():
             new_provider = self.config.ai_provider
             new_model = self.config.model_name
+            new_academic_url = self.config.academic_base_url
+            new_academic_model = self.config.academic_model_name
             new_local_endpoint = self.config.local_endpoint_url
             new_local_name = self.config.local_model_name
             
@@ -621,13 +690,15 @@ class MainWindow(QMainWindow):
             
             provider_changed = (old_provider != new_provider)
             model_changed = (old_model != new_model and bool(new_model))
+            academic_changed = (old_academic_url != new_academic_url or old_academic_model != new_academic_model)
+            academic_keys_changed = getattr(dialog, "academic_keys_were_changed", False)
             key_changed = getattr(dialog, "key_was_changed", False)
             local_changed = (old_local_endpoint != new_local_endpoint or old_local_name != new_local_name)
             
-            if model_changed:
+            if model_changed and new_provider == "cloud":
                 self.ai_assistant.set_model_name(new_model)
 
-            if provider_changed or model_changed or key_changed or local_changed:
+            if provider_changed or model_changed or key_changed or local_changed or academic_changed or academic_keys_changed:
                 self.ai_assistant.reset_client()
                 self.chat_panel.clear_chat()
                 self.chat_panel.set_index_status("unloaded")
@@ -638,9 +709,17 @@ class MainWindow(QMainWindow):
                     
                 active_model = self.ai_assistant.get_active_model_name()
                 if provider_changed:
-                    provider_label = "Local Model" if new_provider == "local" else "Cloud (Gemini)"
+                    if new_provider == "local":
+                        provider_label = "Local Model"
+                    elif new_provider == "academic":
+                        provider_label = "Academic AI (ChatGPT)"
+                    else:
+                        provider_label = "Cloud (Gemini)"
                     self.add_log(f"AI Provider switched to {provider_label} ({active_model}). Please re-index the document.")
                     QMessageBox.information(self, "AI Provider Changed", f"AI Provider switched to {provider_label} ({active_model}).\nPlease re-index the document to continue.")
+                elif academic_changed or (academic_keys_changed and new_provider == "academic"):
+                    self.add_log(f"Academic AI configuration updated ({active_model}). Please re-index the document.")
+                    QMessageBox.information(self, "Academic AI Configuration Updated", f"Academic AI model set to {active_model}.\nPlease re-index the document to continue.")
                 elif model_changed:
                     self.add_log(f"Model changed to {new_model}. Please re-index the document.")
                     QMessageBox.information(self, "Model Changed", f"AI model changed to {new_model}.\nPlease re-index the document to continue.")
@@ -748,7 +827,8 @@ class MainWindow(QMainWindow):
     def open_pdf(self):
         if not self.maybe_save_prompt():
             return
-        file_path, _ = QFileDialog.getOpenFileName(self, "Open PDF", "", "PDF Files (*.pdf)")
+        initial_dir = self.last_pdf_dir if (self.last_pdf_dir and os.path.isdir(self.last_pdf_dir)) else ""
+        file_path, _ = QFileDialog.getOpenFileName(self, "Open PDF", initial_dir, "PDF Files (*.pdf)")
         if file_path:
             self.load_pdf(file_path)
 
@@ -940,12 +1020,18 @@ class MainWindow(QMainWindow):
                 self.mode_action.setChecked(False)
                 self.toggle_layout_mode(False)
             
-            self.chat_panel.add_system_message(f"Loaded: {os.path.basename(file_path)}<br><br><b>Click the 'Index PDF' button below</b> to enable AI Q&A and text-selection features.")
+            pdf_name = os.path.basename(file_path)
+            self.setWindowTitle(pdf_name)
+            self.last_pdf_dir = os.path.dirname(os.path.abspath(file_path))
+            self.config.last_opened_dir = self.last_pdf_dir
+            
+            self.chat_panel.add_system_message(f"Loaded: {pdf_name}<br><br><b>Click the 'Index PDF' button below</b> to enable AI Q&A and text-selection features.")
             self.open_action.setText("Load another PDF")
             self.chat_panel.show_index_button()
-            self.add_log(f"PDF loaded: {os.path.basename(file_path)}")
+            self.add_log(f"PDF loaded: {pdf_name}")
             self.update_save_action_state()
         else:
+            self.setWindowTitle("AI-Enhanced PDF Viewer")
             self.update_save_action_state()
             QMessageBox.critical(self, "Error", "Failed to load PDF.")
 
@@ -1018,6 +1104,11 @@ class MainWindow(QMainWindow):
             if not api_key:
                 self.chat_panel.add_system_message("Please configure Google API Key in Settings to enable AI features.")
                 return
+        elif self.ai_assistant.provider == "academic":
+            cid, sec = self.ai_assistant._get_academic_credentials()
+            if not cid or not sec:
+                self.chat_panel.add_system_message("Please configure Academic Client ID and Client Secret in Settings to enable AI features.")
+                return
 
         # Check document size limits before indexing (CRIT-03)
         from backend.ai_assistant import MAX_PDF_FILE_SIZE_BYTES, MAX_PDF_PAGES, LARGE_DOCUMENT_ERROR_MESSAGE
@@ -1057,13 +1148,13 @@ class MainWindow(QMainWindow):
         if self.ai_assistant.provider == "cloud" and not getattr(self.ai_assistant, "chat_session", None):
             self.on_indexing_error("Indexing session could not be established.")
             return
-        elif self.ai_assistant.provider == "local" and not getattr(self.ai_assistant, "local_document_text", None):
+        elif self.ai_assistant.provider in ("local", "academic") and not getattr(self.ai_assistant, "local_document_text", None):
             self.on_indexing_error("Document text could not be extracted.")
             return
             
         model = self.ai_assistant.get_active_model_name()
         doc_tokens = 0
-        if self.ai_assistant.provider == "local":
+        if self.ai_assistant.provider in ("local", "academic"):
             doc_tokens = len(getattr(self.ai_assistant, "local_document_text", "") or "") // 4
         elif self.ai_assistant.provider == "cloud":
             if self.pdf_doc and self.pdf_doc.doc:

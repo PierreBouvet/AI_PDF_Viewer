@@ -133,6 +133,10 @@ class AnnotationButton(QPushButton):
 
 class FloatingAnnotationBar(QWidget):
     tool_changed = Signal(object)  # AnnotationTool
+    search_requested = Signal(str)
+    next_requested = Signal()
+    prev_requested = Signal()
+    search_closed = Signal()
 
     def __init__(self, parent=None):
         super().__init__(parent)
@@ -179,6 +183,49 @@ class FloatingAnnotationBar(QWidget):
         self.btn_note.clicked.connect(self._on_note_clicked)
         self.layout.addWidget(self.btn_note)
         
+        # 5. Search Button -> search.svg
+        self.btn_search = AnnotationButton("Search Document (Cmd+F)", self)
+        self.btn_search.setIcon(load_svg_icon("search.svg", active=False, is_dark=self.is_dark))
+        self.btn_search.clicked.connect(self.show_search_ui)
+        self.layout.addWidget(self.btn_search)
+        
+        # Search UI Widgets (Hidden by default)
+        from PySide6.QtWidgets import QLineEdit, QLabel
+        self.search_input = QLineEdit()
+        self.search_input.setPlaceholderText("Search...")
+        self.search_input.setFixedWidth(160)
+        self.search_input.setStyleSheet("""
+            QLineEdit {
+                border: none;
+                background: transparent;
+                font-size: 11pt;
+            }
+        """)
+        self.search_input.returnPressed.connect(self._on_search)
+        self.search_input.textChanged.connect(self._on_text_changed)
+        
+        self.btn_prev = AnnotationButton("Previous Match", self)
+        self.btn_prev.setIcon(load_svg_icon("chevron-up-dark.svg", active=False, is_dark=self.is_dark))
+        self.btn_prev.clicked.connect(self.prev_requested.emit)
+        
+        self.btn_next = AnnotationButton("Next Match", self)
+        self.btn_next.setIcon(load_svg_icon("chevron-down-dark.svg", active=False, is_dark=self.is_dark))
+        self.btn_next.clicked.connect(self.next_requested.emit)
+        
+        self.matches_label = QLabel("")
+        self.matches_label.setStyleSheet("font-size: 10pt; color: #777; margin-right: 4px;")
+        
+        self.btn_close = AnnotationButton("Close Search", self)
+        self.btn_close.setIcon(load_svg_icon("x.svg", active=False, is_dark=self.is_dark))
+        self.btn_close.clicked.connect(self.hide_search_ui)
+        
+        self.layout.addWidget(self.search_input)
+        self.layout.addWidget(self.btn_prev)
+        self.layout.addWidget(self.btn_next)
+        self.layout.addWidget(self.matches_label)
+        self.layout.addWidget(self.btn_close)
+        
+        self._set_search_ui_visible(False)
         self.setFixedHeight(34)
 
     def update_theme(self, app_style: str = "Native", color_mode: str = "Light"):
@@ -190,6 +237,10 @@ class FloatingAnnotationBar(QWidget):
         self.btn_hl_text.set_dark(self.is_dark)
         self.btn_hl_freehand.set_dark(self.is_dark)
         self.btn_note.set_dark(self.is_dark)
+        self.btn_search.set_dark(self.is_dark)
+        self.btn_prev.set_dark(self.is_dark)
+        self.btn_next.set_dark(self.is_dark)
+        self.btn_close.set_dark(self.is_dark)
         
         self._refresh_icons()
         self.update()
@@ -206,6 +257,11 @@ class FloatingAnnotationBar(QWidget):
         
         is_note = (self.active_tool == AnnotationTool.NOTE)
         self.btn_note.setIcon(load_svg_icon("sticky-note.svg", active=is_note, is_dark=self.is_dark))
+        
+        self.btn_search.setIcon(load_svg_icon("search.svg", active=False, is_dark=self.is_dark))
+        self.btn_prev.setIcon(load_svg_icon("chevron-up-dark.svg", active=False, is_dark=self.is_dark))
+        self.btn_next.setIcon(load_svg_icon("chevron-down-dark.svg", active=False, is_dark=self.is_dark))
+        self.btn_close.setIcon(load_svg_icon("x.svg", active=False, is_dark=self.is_dark))
 
     def paintEvent(self, event):
         painter = QPainter(self)
@@ -305,3 +361,54 @@ class FloatingAnnotationBar(QWidget):
 
     def clear_selection(self):
         self.set_tool(AnnotationTool.NONE)
+
+    def _set_search_ui_visible(self, visible: bool):
+        self.btn_text.setVisible(not visible)
+        self.btn_hl_text.setVisible(not visible)
+        self.btn_hl_freehand.setVisible(not visible)
+        self.btn_note.setVisible(not visible)
+        self.btn_search.setVisible(not visible)
+        
+        self.search_input.setVisible(visible)
+        self.btn_prev.setVisible(visible)
+        self.btn_next.setVisible(visible)
+        self.matches_label.setVisible(visible)
+        self.btn_close.setVisible(visible)
+
+    def show_search_ui(self):
+        self._set_search_ui_visible(True)
+        self._animate_opacity(1.00)
+        self.search_input.setFocus()
+        self.search_input.selectAll()
+        # Adjust size dynamically
+        self.adjustSize()
+        if hasattr(self.parent(), "update_annotation_bar_pos"):
+            self.parent().update_annotation_bar_pos()
+
+    def hide_search_ui(self):
+        if not self.search_input.isVisible():
+            return
+        self._set_search_ui_visible(False)
+        self.search_input.clear()
+        self.matches_label.setText("")
+        self.search_closed.emit()
+        self.adjustSize()
+        if hasattr(self.parent(), "update_annotation_bar_pos"):
+            self.parent().update_annotation_bar_pos()
+        if not self.is_hovered:
+            self._animate_opacity(0.20)
+
+    def _on_search(self):
+        if self.search_input.text():
+            self.next_requested.emit()
+            
+    def _on_text_changed(self, text):
+        if not text:
+            self.matches_label.setText("")
+        self.search_requested.emit(text)
+            
+    def update_matches(self, current, total):
+        if total == 0:
+            self.matches_label.setText("No results")
+        else:
+            self.matches_label.setText(f"{current}/{total}")

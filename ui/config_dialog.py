@@ -205,6 +205,28 @@ class LocalModelFetcherThread(QThread):
             self.error_occurred.emit(str(e))
 
 
+class AcademicModelFetcherThread(QThread):
+    models_fetched = Signal(list)
+    error_occurred = Signal(str)
+
+    def __init__(self, base_url: str, client_id: str, client_secret: str, parent=None):
+        super().__init__(parent)
+        self.base_url = base_url
+        self.client_id = client_id
+        self.client_secret = client_secret
+
+    def run(self):
+        try:
+            from backend.ai_assistant import fetch_academic_models
+            models = fetch_academic_models(self.base_url, self.client_id, self.client_secret)
+            if models:
+                self.models_fetched.emit(models)
+            else:
+                self.error_occurred.emit("No models returned by academic API.")
+        except Exception as e:
+            self.error_occurred.emit(str(e))
+
+
 
 class ConfigDialog(QDialog):
     theme_preview_requested = Signal(str, str)
@@ -213,11 +235,13 @@ class ConfigDialog(QDialog):
         super().__init__(parent)
         self.fetcher = None
         self.local_fetcher = None
+        self.academic_fetcher = None
         self.setWindowTitle("Settings")
-        self.setFixedSize(520, 480)
+        self.setFixedSize(540, 520)
         
         self.config = ConfigManager()
         self.key_was_changed = False
+        self.academic_keys_were_changed = False
         
         # Read initial API key directly from keychain if not explicitly provided
         if current_api_key is not None:
@@ -228,6 +252,20 @@ class ConfigDialog(QDialog):
                 self._initial_api_key = keyring.get_password("AIPDFViewer", "api_key") or ""
             except Exception:
                 self._initial_api_key = ""
+
+        # Read initial academic credentials from keychain (with environment fallback)
+        try:
+            import keyring
+            self._initial_academic_client_id = keyring.get_password("AIPDFViewer", "academic_client_id") or ""
+            self._initial_academic_client_secret = keyring.get_password("AIPDFViewer", "academic_client_secret") or ""
+        except Exception:
+            self._initial_academic_client_id = ""
+            self._initial_academic_client_secret = ""
+
+        if not self._initial_academic_client_id:
+            self._initial_academic_client_id = os.environ.get("CLIENT_ID", "").strip()
+        if not self._initial_academic_client_secret:
+            self._initial_academic_client_secret = os.environ.get("CLIENT_SECRET", "").strip()
         
         # Main layout
         main_layout = QVBoxLayout(self)
@@ -409,20 +447,26 @@ class ConfigDialog(QDialog):
         
         self.provider_group = QButtonGroup(self)
         self.radio_cloud = QRadioButton("Cloud (Google Gemini)")
+        self.radio_academic = QRadioButton("Academic (ChatGPT)")
         self.radio_local = QRadioButton("Local Model (Ollama / GGUF)")
         
         self.provider_group.addButton(self.radio_cloud)
+        self.provider_group.addButton(self.radio_academic)
         self.provider_group.addButton(self.radio_local)
         
         if self.config.ai_provider == "local":
             self.radio_local.setChecked(True)
+        elif self.config.ai_provider == "academic":
+            self.radio_academic.setChecked(True)
         else:
             self.radio_cloud.setChecked(True)
             
         self.radio_cloud.toggled.connect(self._on_provider_toggled)
+        self.radio_academic.toggled.connect(self._on_provider_toggled)
         self.radio_local.toggled.connect(self._on_provider_toggled)
         
         provider_layout.addWidget(self.radio_cloud)
+        provider_layout.addWidget(self.radio_academic)
         provider_layout.addWidget(self.radio_local)
         provider_layout.addStretch()
         
@@ -490,6 +534,77 @@ class ConfigDialog(QDialog):
         cloud_layout.addLayout(model_group)
         
         layout.addWidget(self.cloud_container)
+        
+        # 3. Container for Academic AI Options
+        self.academic_container = QWidget()
+        academic_layout = QVBoxLayout(self.academic_container)
+        academic_layout.setContentsMargins(0, 0, 0, 0)
+        academic_layout.setSpacing(10)
+
+        academic_form = QFormLayout()
+        academic_form.setSpacing(8)
+        academic_form.setLabelAlignment(Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter)
+
+        self.academic_url_input = QLineEdit(self.config.academic_base_url or "https://meduniwien-api.academic-ai.at")
+        self.academic_url_input.setPlaceholderText("https://meduniwien-api.academic-ai.at")
+        academic_form.addRow("Base URL:", self.academic_url_input)
+
+        self.academic_id_input = QLineEdit(self._initial_academic_client_id)
+        self.academic_id_input.setPlaceholderText("Enter your academic Client ID...")
+        academic_form.addRow("Client ID:", self.academic_id_input)
+
+        self.academic_secret_input = QLineEdit(self._initial_academic_client_secret)
+        self.academic_secret_input.setEchoMode(QLineEdit.EchoMode.Password)
+        self.academic_secret_input.setPlaceholderText("Enter your academic Client Secret...")
+        academic_form.addRow("Client Secret:", self.academic_secret_input)
+
+        academic_layout.addLayout(academic_form)
+
+        # Academic Model Selection Section
+        academic_model_group = QVBoxLayout()
+        academic_model_header = QLabel("<b>Academic Model (ChatGPT)</b>")
+        academic_model_header.setStyleSheet("font-size: 10pt; color: #1c1c1e;")
+        academic_model_group.addWidget(academic_model_header)
+
+        academic_model_layout = QHBoxLayout()
+        self.academic_model_combo = QComboBox()
+        current_academic = self.config.academic_model_name or "gpt-4o"
+        self.academic_model_combo.addItem(current_academic)
+
+        self.fetch_academic_btn = QPushButton("Fetch Models")
+        self.fetch_academic_btn.setStyleSheet("""
+            QPushButton {
+                background-color: #007aff;
+                color: #ffffff;
+                font-weight: 500;
+                border: none;
+                border-radius: 5px;
+                padding: 5px 12px;
+            }
+            QPushButton:hover {
+                background-color: #0062cc;
+            }
+            QPushButton:disabled {
+                background-color: #b0bec5;
+            }
+        """)
+        self.fetch_academic_btn.clicked.connect(self.fetch_academic_models)
+
+        academic_model_layout.addWidget(self.academic_model_combo)
+        academic_model_layout.addWidget(self.fetch_academic_btn)
+        academic_model_group.addLayout(academic_model_layout)
+
+        self.academic_status_label = QLabel("")
+        self.academic_status_label.setStyleSheet("color: #8e8e93; font-size: 8.5pt;")
+        academic_model_group.addWidget(self.academic_status_label)
+
+        academic_hint = QLabel("Your Client ID and Client Secret are securely saved in your macOS Keychain.")
+        academic_hint.setStyleSheet("color: #8e8e93; font-size: 8.5pt;")
+        academic_model_group.addWidget(academic_hint)
+
+        academic_layout.addLayout(academic_model_group)
+
+        layout.addWidget(self.academic_container)
         
         # 3. Container for Local Model Options
         self.local_container = QWidget()
@@ -575,10 +690,70 @@ class ConfigDialog(QDialog):
 
     def _on_provider_toggled(self):
         is_cloud = self.radio_cloud.isChecked()
+        is_academic = self.radio_academic.isChecked()
+        is_local = self.radio_local.isChecked()
+
         self.cloud_container.setVisible(is_cloud)
-        self.local_container.setVisible(not is_cloud)
-        if not is_cloud:
+        self.academic_container.setVisible(is_academic)
+        self.local_container.setVisible(is_local)
+
+        if is_local:
             self.fetch_local_models()
+        elif is_academic:
+            if self.academic_id_input.text().strip() and self.academic_secret_input.text().strip():
+                if self.academic_model_combo.count() <= 1:
+                    self.fetch_academic_models()
+
+    def fetch_academic_models(self):
+        base_url = self.academic_url_input.text().strip() or "https://meduniwien-api.academic-ai.at"
+        client_id = self.academic_id_input.text().strip()
+        client_secret = self.academic_secret_input.text().strip()
+
+        if not client_id or not client_secret:
+            QMessageBox.warning(self, "Warning", "Please enter both Client ID and Client Secret first.")
+            return
+
+        self.fetch_academic_btn.setText("Fetching...")
+        self.fetch_academic_btn.setEnabled(False)
+        self.academic_status_label.setStyleSheet("color: #8e8e93; font-size: 8.5pt;")
+        self.academic_status_label.setText("Connecting to Academic AI server...")
+
+        try:
+            if self.academic_fetcher is not None and shiboken6.isValid(self.academic_fetcher) and self.academic_fetcher.isRunning():
+                self.academic_fetcher.wait(300)
+        except Exception:
+            pass
+
+        self.academic_fetcher = AcademicModelFetcherThread(base_url, client_id, client_secret, parent=self)
+        self.academic_fetcher.models_fetched.connect(self._on_academic_models_fetched)
+        self.academic_fetcher.error_occurred.connect(self._on_academic_fetch_error)
+        self.academic_fetcher.start()
+
+    def _on_academic_models_fetched(self, models: list):
+        self.fetch_academic_btn.setText("Fetch Models")
+        self.fetch_academic_btn.setEnabled(True)
+        if models:
+            current = self.config.academic_model_name
+            self.academic_model_combo.clear()
+            self.academic_model_combo.addItems(models)
+
+            idx = self.academic_model_combo.findText(current)
+            if idx >= 0:
+                self.academic_model_combo.setCurrentIndex(idx)
+            else:
+                self.academic_model_combo.setCurrentIndex(0)
+
+            self.academic_status_label.setStyleSheet("color: #34c759; font-size: 8.5pt;")
+            self.academic_status_label.setText(f"✓ Found {len(models)} authorized model(s)")
+        else:
+            self.academic_status_label.setStyleSheet("color: #ff9500; font-size: 8.5pt;")
+            self.academic_status_label.setText("No models returned by academic API.")
+
+    def _on_academic_fetch_error(self, err_msg: str):
+        self.fetch_academic_btn.setText("Fetch Models")
+        self.fetch_academic_btn.setEnabled(True)
+        self.academic_status_label.setStyleSheet("color: #ff3b30; font-size: 8.5pt;")
+        self.academic_status_label.setText(f"⚠️ {err_msg}")
 
     def fetch_local_models(self):
         endpoint = self.endpoint_input.text().strip() or "http://localhost:11434/v1"
@@ -735,6 +910,11 @@ class ConfigDialog(QDialog):
                 self.local_fetcher.wait(500)
         except Exception:
             pass
+        try:
+            if self.academic_fetcher is not None and shiboken6.isValid(self.academic_fetcher) and self.academic_fetcher.isRunning():
+                self.academic_fetcher.wait(500)
+        except Exception:
+            pass
         super().done(r)
 
     def accept(self):
@@ -752,6 +932,35 @@ class ConfigDialog(QDialog):
                         pass
             except Exception as e:
                 logger.error(f"Failed to save API key to keychain: {e}")
+
+        new_cid = self.academic_id_input.text().strip()
+        new_sec = self.academic_secret_input.text().strip()
+        if new_cid != self._initial_academic_client_id or new_sec != self._initial_academic_client_secret:
+            self.academic_keys_were_changed = True
+            try:
+                import keyring
+                if new_cid:
+                    keyring.set_password("AIPDFViewer", "academic_client_id", new_cid)
+                else:
+                    try:
+                        keyring.delete_password("AIPDFViewer", "academic_client_id")
+                    except Exception:
+                        pass
+
+                if new_sec:
+                    keyring.set_password("AIPDFViewer", "academic_client_secret", new_sec)
+                else:
+                    try:
+                        keyring.delete_password("AIPDFViewer", "academic_client_secret")
+                    except Exception:
+                        pass
+            except Exception as e:
+                logger.error(f"Failed to save academic credentials to keychain: {e}")
+
+        self.config.academic_base_url = self.academic_url_input.text().strip() or "https://meduniwien-api.academic-ai.at"
+        selected_academic = self.academic_model_combo.currentText().strip()
+        if selected_academic and selected_academic != "No models found":
+            self.config.academic_model_name = selected_academic
         
         self.config.app_style = self.style_combo.currentText()
         self.config.color_mode = self.mode_combo.currentText()
@@ -761,6 +970,8 @@ class ConfigDialog(QDialog):
             self.config.local_endpoint_url = self.endpoint_input.text().strip()
             self.config.local_model_name = self.local_model_combo.currentText().strip()
             self.config.local_timeout_sec = self.timeout_spin.value() * 60
+        elif self.radio_academic.isChecked():
+            self.config.ai_provider = "academic"
         else:
             self.config.ai_provider = "cloud"
             selected_model = self.model_combo.currentText().strip()
