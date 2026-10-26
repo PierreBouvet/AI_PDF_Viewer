@@ -342,7 +342,12 @@ class AIChatPanel(QWidget):
         
         cfg = ConfigManager()
         provider = cfg.ai_provider
-        model_name = cfg.local_model_name if provider == "local" else (cfg.model_name or "gemini-flash-lite-latest")
+        if provider == "local":
+            model_name = cfg.local_model_name
+        elif provider == "academic":
+            model_name = cfg.academic_model_name or "gpt-4o"
+        else:
+            model_name = cfg.model_name or "gemini-flash-lite-latest"
 
         current_key = self.prompts_combo.currentData()
         self.prompts_combo.blockSignals(True)
@@ -387,7 +392,12 @@ class AIChatPanel(QWidget):
         
         cfg = ConfigManager()
         provider = cfg.ai_provider
-        model_name = cfg.local_model_name if provider == "local" else (cfg.model_name or "gemini-flash-lite-latest")
+        if provider == "local":
+            model_name = cfg.local_model_name
+        elif provider == "academic":
+            model_name = cfg.academic_model_name or "gpt-4o"
+        else:
+            model_name = cfg.model_name or "gemini-flash-lite-latest"
 
         if self.document_tokens <= 0:
             self.send_btn.setText("Send")

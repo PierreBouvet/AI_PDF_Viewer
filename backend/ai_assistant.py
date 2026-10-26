@@ -90,6 +90,107 @@ def format_local_messages_for_model(messages: list, model_name: str) -> list:
     return formatted
 
 
+def _get_academic_ssl_context():
+    import ssl
+    try:
+        import certifi
+        return ssl.create_default_context(cafile=certifi.where())
+    except Exception:
+        pass
+    try:
+        return ssl.create_default_context()
+    except Exception:
+        return ssl._create_unverified_context()
+
+
+def fetch_academic_models(base_url: str, client_id: str, client_secret: str) -> list[str]:
+    """
+    Fetch authorized models from the academic API endpoint (e.g. /api/v1/llm/models).
+    """
+    clean_url = (base_url or "").strip().rstrip("/")
+    if not clean_url:
+        clean_url = "https://meduniwien-api.academic-ai.at"
+    if not clean_url.startswith("http://") and not clean_url.startswith("https://"):
+        clean_url = f"https://{clean_url}"
+
+    cid = (client_id or "").strip()
+    sec = (client_secret or "").strip()
+    if not cid or not sec:
+        raise ValueError("Client ID and Client Secret are required to fetch models.")
+
+    models_url = f"{clean_url}/api/v1/llm/models"
+    headers = {
+        "X-Client-ID": cid,
+        "X-Client-Secret": sec,
+        "User-Agent": "AI_PDF_Viewer"
+    }
+
+    req = urllib.request.Request(models_url, headers=headers, method="GET")
+    ctx = _get_academic_ssl_context()
+    try:
+        try:
+            resp_handle = urllib.request.urlopen(req, timeout=15, context=ctx)
+        except urllib.error.URLError as url_err:
+            if "CERTIFICATE_VERIFY_FAILED" in str(url_err):
+                import ssl
+                resp_handle = urllib.request.urlopen(req, timeout=15, context=ssl._create_unverified_context())
+            else:
+                raise
+
+        with resp_handle as resp:
+            data = json.loads(resp.read().decode("utf-8"))
+            models = [m.get("modelName") for m in data.get("data", []) if m.get("modelName")]
+            return models
+    except urllib.error.HTTPError as e:
+        err_msg = e.reason
+        try:
+            err_json = json.loads(e.read().decode("utf-8"))
+            if "message" in err_json:
+                err_msg = err_json["message"]
+            elif "meta" in err_json and "error" in err_json["meta"]:
+                err_msg = err_json["meta"]["error"].get("message", err_msg)
+        except Exception:
+            pass
+        raise ValueError(f"Academic API Error ({e.code}): {err_msg}")
+    except Exception as e:
+        raise ValueError(f"Failed to connect to Academic API at {clean_url}: {e}")
+
+
+def format_academic_messages(messages: list) -> list:
+    """
+    Format message list for the Academic API endpoint.
+    The academic gateway strictly validates roles to be 'user' or 'assistant'.
+    Any 'system' instruction messages must be merged into the first user message.
+    """
+    if not messages:
+        return []
+
+    formatted = []
+    pending_system = []
+
+    for msg in messages:
+        role = msg.get("role", "user")
+        content = msg.get("content", "")
+        if role == "system":
+            if content:
+                pending_system.append(content)
+        elif role in ("user", "assistant"):
+            if role == "user" and pending_system:
+                sys_block = "\n\n".join(pending_system)
+                merged = f"{sys_block}\n\n[USER INSTRUCTION]\n{content}" if content else sys_block
+                formatted.append({"role": "user", "content": merged})
+                pending_system = []
+            else:
+                formatted.append({"role": role, "content": content})
+        else:
+            formatted.append({"role": "user", "content": content})
+
+    if pending_system:
+        formatted.insert(0, {"role": "user", "content": "\n\n".join(pending_system)})
+
+    return formatted
+
+
 def ensure_local_ai_server(raw_endpoint: str = "http://localhost:11434", timeout_sec: float = 4.0) -> bool:
     """
     Check if the local AI server (e.g., Ollama) is running.
@@ -243,9 +344,9 @@ def estimate_response_time_seconds(provider: str, model_name: str, doc_tokens: i
     prov = (provider or "").lower()
     model = (model_name or "").lower()
     
-    if prov == "cloud" or "gemini" in model:
-        # Gemini server-side context caching yields fast constant-time responses (~1.5 - 2.5s)
-        return 2.0
+    if prov in ("cloud", "academic") or "gemini" in model or "gpt" in model:
+        # Gemini server-side context caching & Academic ChatGPT endpoints yield fast constant-time responses (~2.0 - 2.5s)
+        return 2.5
 
     expected_output_tokens = estimate_expected_output_tokens(prompt_text, prompt_tokens)
     total_input_tokens = max(0, doc_tokens + prompt_tokens)
@@ -317,6 +418,9 @@ class AIAssistant:
         if self.provider == "local":
             config = ConfigManager()
             return config.local_model_name or "Local Model"
+        if self.provider == "academic":
+            config = ConfigManager()
+            return config.academic_model_name or "gpt-4o"
         return self.model_name
 
     def _get_api_key(self) -> str:
@@ -324,6 +428,21 @@ class AIAssistant:
             return keyring.get_password("AIPDFViewer", "api_key") or ""
         except Exception:
             return ""
+
+    def _get_academic_credentials(self) -> tuple[str, str]:
+        cid = ""
+        sec = ""
+        try:
+            cid = keyring.get_password("AIPDFViewer", "academic_client_id") or ""
+            sec = keyring.get_password("AIPDFViewer", "academic_client_secret") or ""
+        except Exception as e:
+            logger.debug(f"Failed to read academic credentials from keyring: {e}")
+        
+        if not cid:
+            cid = os.environ.get("CLIENT_ID", "").strip()
+        if not sec:
+            sec = os.environ.get("CLIENT_SECRET", "").strip()
+        return cid, sec
 
     def _get_client(self):
         api_key = self._get_api_key()
@@ -367,7 +486,7 @@ class AIAssistant:
                 self._build_chat_session(client)
 
     def rank_available_models(self) -> list:
-        if self.provider == "local":
+        if self.provider in ("local", "academic"):
             return [{"name": self.get_active_model_name(), "RPM": 9999, "RPD": 999999}]
 
         client = self._get_client()
@@ -482,20 +601,25 @@ class AIAssistant:
                 else:
                     clean_doc.insert_pdf(doc, from_page=page_num, to_page=page_num)
                     
-            if self.provider == "local":
-                # Check if Ollama is reachable before proceeding
-                config = ConfigManager()
-                raw_endpoint = config.local_endpoint_url or "http://localhost:11434/v1"
-                try:
-                    import urllib.request
-                    base_url = raw_endpoint.split("/v1")[0].split("/chat")[0].rstrip("/")
-                    req = urllib.request.Request(f"{base_url}/api/version", headers={"User-Agent": "AI_PDF_Viewer"})
-                    with urllib.request.urlopen(req, timeout=2) as resp:
-                        resp.read()
-                except Exception:
-                    raise ConnectionError("Ollama service is not running. Please start Ollama on your machine.")
-                    
-                # Local indexing: extract clean structured text page-by-page
+            if self.provider in ("local", "academic"):
+                if self.provider == "local":
+                    # Check if Ollama is reachable before proceeding
+                    config = ConfigManager()
+                    raw_endpoint = config.local_endpoint_url or "http://localhost:11434/v1"
+                    try:
+                        import urllib.request
+                        base_url = raw_endpoint.split("/v1")[0].split("/chat")[0].rstrip("/")
+                        req = urllib.request.Request(f"{base_url}/api/version", headers={"User-Agent": "AI_PDF_Viewer"})
+                        with urllib.request.urlopen(req, timeout=2) as resp:
+                            resp.read()
+                    except Exception:
+                        raise ConnectionError("Ollama service is not running. Please start Ollama on your machine.")
+                elif self.provider == "academic":
+                    cid, sec = self._get_academic_credentials()
+                    if not cid or not sec:
+                        raise ValueError("Academic Client ID and Client Secret not configured. Please check Settings.")
+
+                # Extract clean structured text page-by-page
                 pages_text = []
                 for p_idx, page in enumerate(clean_doc):
                     t = page.get_text().strip()
@@ -506,7 +630,7 @@ class AIAssistant:
                     raise ValueError(LARGE_DOCUMENT_ERROR_MESSAGE)
                 self.local_document_text = extracted_text
                 self.local_chat_history = []
-                logger.info(f"Indexed {len(pages_text)} pages locally for {self.get_active_model_name()}.")
+                logger.info(f"Indexed {len(pages_text)} pages for {self.provider} model {self.get_active_model_name()}.")
                 return
 
             # Cloud (Gemini) indexing
@@ -700,13 +824,80 @@ class AIAssistant:
 
         return res_text
 
+    def _call_academic_api(self, messages: list, model_override: str = "", stream_callback=None) -> str:
+        """Call university Academic AI REST gateway."""
+        cid, sec = self._get_academic_credentials()
+        if not cid or not sec:
+            raise ValueError("Academic Client ID and Client Secret are not configured. Please set them in Settings.")
+
+        config = ConfigManager()
+        base_url = (config.academic_base_url or "https://meduniwien-api.academic-ai.at").strip().rstrip("/")
+        if not base_url.startswith("http://") and not base_url.startswith("https://"):
+            base_url = f"https://{base_url}"
+
+        url = f"{base_url}/api/v1/llm/chat"
+        target_model = model_override or config.academic_model_name or "gpt-4o"
+
+        formatted_messages = format_academic_messages(messages)
+        payload = {
+            "model": target_model,
+            "messages": formatted_messages,
+            "temperature": 0.3,
+            "maxTokens": 4096,
+        }
+
+        headers = {
+            "X-Client-ID": cid,
+            "X-Client-Secret": sec,
+            "Content-Type": "application/json",
+            "User-Agent": "AI_PDF_Viewer"
+        }
+
+        req_data = json.dumps(payload).encode("utf-8")
+        req = urllib.request.Request(url, data=req_data, headers=headers, method="POST")
+        timeout_sec = max(10, getattr(config, "academic_timeout_sec", 120))
+        ctx = _get_academic_ssl_context()
+
+        try:
+            try:
+                resp_handle = urllib.request.urlopen(req, timeout=timeout_sec, context=ctx)
+            except urllib.error.URLError as url_err:
+                if "CERTIFICATE_VERIFY_FAILED" in str(url_err):
+                    import ssl
+                    resp_handle = urllib.request.urlopen(req, timeout=timeout_sec, context=ssl._create_unverified_context())
+                else:
+                    raise
+
+            with resp_handle as resp:
+                result = json.loads(resp.read().decode("utf-8"))
+                content = result.get("data", {}).get("content", "").strip()
+                if stream_callback and content:
+                    stream_callback(content)
+                return content
+        except urllib.error.HTTPError as e:
+            err_msg = e.reason
+            try:
+                err_json = json.loads(e.read().decode("utf-8"))
+                if "message" in err_json:
+                    err_msg = err_json["message"]
+                elif "meta" in err_json and "error" in err_json["meta"]:
+                    err_msg = err_json["meta"]["error"].get("message", err_msg)
+            except Exception:
+                pass
+            raise ValueError(f"Academic AI Error ({e.code}): {err_msg}")
+        except urllib.error.URLError as e:
+            raise ValueError(f"Could not connect to Academic AI server at {url}: {e.reason}")
+        except Exception as e:
+            logger.error(f"Academic AI request failed: {e}")
+            raise
+
 
     def ask(self, question: str, stream_callback=None) -> str:
         """Ask a question using the indexed document context."""
         if len(question) > MAX_QUESTION_LENGTH:
             raise ValueError(f"Question exceeds maximum allowed length of {MAX_QUESTION_LENGTH} characters.")
 
-        if self.provider == "local":
+        if self.provider in ("local", "academic"):
             if not self.local_document_text:
                 raise ValueError("No document is currently indexed. Please load a PDF and click Index first.")
             
@@ -722,7 +913,10 @@ class AIAssistant:
                 messages.append(turn)
             messages.append({"role": "user", "content": question})
             
-            response_text = self._call_local_api(messages, stream_callback=stream_callback)
+            if self.provider == "academic":
+                response_text = self._call_academic_api(messages, stream_callback=stream_callback)
+            else:
+                response_text = self._call_local_api(messages, stream_callback=stream_callback)
             self.local_chat_history.append({"role": "user", "content": question})
             self.local_chat_history.append({"role": "assistant", "content": response_text})
             return response_text
@@ -752,7 +946,7 @@ class AIAssistant:
         if len(question) > MAX_QUESTION_LENGTH:
             raise ValueError(f"Question exceeds maximum allowed length of {MAX_QUESTION_LENGTH} characters.")
 
-        if self.provider == "local":
+        if self.provider in ("local", "academic"):
             system_msg = SYSTEM_INSTRUCTION
             if self.local_document_text:
                 system_msg += f"\n\nDOCUMENT CONTEXT:\n<DOCUMENT_START>\n{self.local_document_text}\n<DOCUMENT_END>"
@@ -761,6 +955,8 @@ class AIAssistant:
                 {"role": "system", "content": system_msg},
                 {"role": "user", "content": question}
             ]
+            if self.provider == "academic":
+                return self._call_academic_api(messages, model_override=model_override, stream_callback=stream_callback)
             return self._call_local_api(messages, model_override=model_override, stream_callback=stream_callback)
 
         # Cloud provider (Gemini)

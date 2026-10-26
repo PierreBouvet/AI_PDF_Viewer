@@ -117,6 +117,10 @@ class PromptsDialog(QDialog):
             self.list_widget.setCurrentRow(0)
 
     def populate_models(self):
+        if self.ai_assistant and self.ai_assistant.provider in ("local", "academic"):
+            self.model_combo.addItem(self.ai_assistant.get_active_model_name())
+            return
+
         # We can try to use the client.models.list() if API key exists
         import keyring
         api_key = keyring.get_password("AIPDFViewer", "api_key")

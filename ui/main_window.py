@@ -663,6 +663,8 @@ class MainWindow(QMainWindow):
     def open_config(self, initial_tab=0):
         old_provider = self.config.ai_provider
         old_model = self.config.model_name
+        old_academic_url = self.config.academic_base_url
+        old_academic_model = self.config.academic_model_name
         old_local_endpoint = self.config.local_endpoint_url
         old_local_name = self.config.local_model_name
         old_style = self.config.app_style
@@ -674,6 +676,8 @@ class MainWindow(QMainWindow):
         if dialog.exec():
             new_provider = self.config.ai_provider
             new_model = self.config.model_name
+            new_academic_url = self.config.academic_base_url
+            new_academic_model = self.config.academic_model_name
             new_local_endpoint = self.config.local_endpoint_url
             new_local_name = self.config.local_model_name
             
@@ -685,13 +689,15 @@ class MainWindow(QMainWindow):
             
             provider_changed = (old_provider != new_provider)
             model_changed = (old_model != new_model and bool(new_model))
+            academic_changed = (old_academic_url != new_academic_url or old_academic_model != new_academic_model)
+            academic_keys_changed = getattr(dialog, "academic_keys_were_changed", False)
             key_changed = getattr(dialog, "key_was_changed", False)
             local_changed = (old_local_endpoint != new_local_endpoint or old_local_name != new_local_name)
             
-            if model_changed:
+            if model_changed and new_provider == "cloud":
                 self.ai_assistant.set_model_name(new_model)
 
-            if provider_changed or model_changed or key_changed or local_changed:
+            if provider_changed or model_changed or key_changed or local_changed or academic_changed or academic_keys_changed:
                 self.ai_assistant.reset_client()
                 self.chat_panel.clear_chat()
                 self.chat_panel.set_index_status("unloaded")
@@ -702,9 +708,17 @@ class MainWindow(QMainWindow):
                     
                 active_model = self.ai_assistant.get_active_model_name()
                 if provider_changed:
-                    provider_label = "Local Model" if new_provider == "local" else "Cloud (Gemini)"
+                    if new_provider == "local":
+                        provider_label = "Local Model"
+                    elif new_provider == "academic":
+                        provider_label = "Academic AI (ChatGPT)"
+                    else:
+                        provider_label = "Cloud (Gemini)"
                     self.add_log(f"AI Provider switched to {provider_label} ({active_model}). Please re-index the document.")
                     QMessageBox.information(self, "AI Provider Changed", f"AI Provider switched to {provider_label} ({active_model}).\nPlease re-index the document to continue.")
+                elif academic_changed or (academic_keys_changed and new_provider == "academic"):
+                    self.add_log(f"Academic AI configuration updated ({active_model}). Please re-index the document.")
+                    QMessageBox.information(self, "Academic AI Configuration Updated", f"Academic AI model set to {active_model}.\nPlease re-index the document to continue.")
                 elif model_changed:
                     self.add_log(f"Model changed to {new_model}. Please re-index the document.")
                     QMessageBox.information(self, "Model Changed", f"AI model changed to {new_model}.\nPlease re-index the document to continue.")
@@ -1082,6 +1096,11 @@ class MainWindow(QMainWindow):
             if not api_key:
                 self.chat_panel.add_system_message("Please configure Google API Key in Settings to enable AI features.")
                 return
+        elif self.ai_assistant.provider == "academic":
+            cid, sec = self.ai_assistant._get_academic_credentials()
+            if not cid or not sec:
+                self.chat_panel.add_system_message("Please configure Academic Client ID and Client Secret in Settings to enable AI features.")
+                return
 
         # Check document size limits before indexing (CRIT-03)
         from backend.ai_assistant import MAX_PDF_FILE_SIZE_BYTES, MAX_PDF_PAGES, LARGE_DOCUMENT_ERROR_MESSAGE
@@ -1121,13 +1140,13 @@ class MainWindow(QMainWindow):
         if self.ai_assistant.provider == "cloud" and not getattr(self.ai_assistant, "chat_session", None):
             self.on_indexing_error("Indexing session could not be established.")
             return
-        elif self.ai_assistant.provider == "local" and not getattr(self.ai_assistant, "local_document_text", None):
+        elif self.ai_assistant.provider in ("local", "academic") and not getattr(self.ai_assistant, "local_document_text", None):
             self.on_indexing_error("Document text could not be extracted.")
             return
             
         model = self.ai_assistant.get_active_model_name()
         doc_tokens = 0
-        if self.ai_assistant.provider == "local":
+        if self.ai_assistant.provider in ("local", "academic"):
             doc_tokens = len(getattr(self.ai_assistant, "local_document_text", "") or "") // 4
         elif self.ai_assistant.provider == "cloud":
             if self.pdf_doc and self.pdf_doc.doc:

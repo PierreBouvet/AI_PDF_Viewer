@@ -95,6 +95,17 @@ def test_local_ai_settings(clean_settings):
     assert clean_settings.local_model_name == "mistral-nemo:12b"
     assert clean_settings.local_timeout_sec == 600
 
+def test_academic_ai_settings(clean_settings):
+    assert clean_settings.academic_base_url == "https://meduniwien-api.academic-ai.at"
+    assert clean_settings.academic_model_name == "gpt-4o"
+    assert clean_settings.academic_timeout_sec == 120
 
+    clean_settings.ai_provider = "academic"
+    clean_settings.academic_base_url = "https://custom-api.university.edu"
+    clean_settings.academic_model_name = "gpt-5-mini"
+    clean_settings.academic_timeout_sec = 180
 
-
+    assert clean_settings.ai_provider == "academic"
+    assert clean_settings.academic_base_url == "https://custom-api.university.edu"
+    assert clean_settings.academic_model_name == "gpt-5-mini"
+    assert clean_settings.academic_timeout_sec == 180
