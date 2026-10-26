@@ -502,6 +502,44 @@ def test_pdf_size_limits_crit_03(tmp_path, monkeypatch):
             assistant.index_pdf(small_pdf_path)
 
 
+def test_generate_keywords_budgeting_huge_input():
+    from backend.ai_assistant import AIAssistant, MAX_QUESTION_LENGTH
+    assistant = AIAssistant("gemini-3.5-flash")
+
+    captured_prompt = []
+    def mock_ask_direct(prompt):
+        captured_prompt.append(prompt)
+        assert len(prompt) <= MAX_QUESTION_LENGTH
+        return "Deep Learning, Neural Networks, Computer Vision"
+
+    assistant.ask_direct = mock_ask_direct
+    huge_text = "Detailed scientific text about machine learning algorithms. " * 500  # 30,000+ chars
+    keywords = assistant.generate_keywords(huge_text)
+    assert len(captured_prompt) == 1
+    assert len(captured_prompt[0]) <= MAX_QUESTION_LENGTH
+    assert "Deep Learning" in keywords
+    assert "Neural Networks" in keywords
+
+
+def test_extract_metadata_budgeting_huge_input():
+    from backend.ai_assistant import AIAssistant, MAX_QUESTION_LENGTH
+    assistant = AIAssistant("gemini-3.5-flash")
+
+    captured_prompt = []
+    def mock_ask_direct(prompt):
+        captured_prompt.append(prompt)
+        assert len(prompt) <= MAX_QUESTION_LENGTH
+        return '{"title": "Test Title", "date": "2024"}'
+
+    assistant.ask_direct = mock_ask_direct
+    huge_text = "First page text content. " * 500  # 12,000+ chars
+    meta = assistant.extract_bibliographic_metadata(huge_text)
+    assert len(captured_prompt) == 1
+    assert len(captured_prompt[0]) <= MAX_QUESTION_LENGTH
+    assert meta.get("title") == "Test Title"
+
+
+
 
 
 

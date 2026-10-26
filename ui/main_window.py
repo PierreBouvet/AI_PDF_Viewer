@@ -13,6 +13,7 @@ from ui.pdf_view import PDFView
 from ui.ai_chat_panel import AIChatPanel
 from ui.config_dialog import ConfigDialog
 from ui.thumbnail_panel import ThumbnailPanel
+from ui.zotero_dialog import ZoteroDialog
 from backend.pdf_document import PDFDocument
 from backend.ai_assistant import AIAssistant
 from backend.prompts_manager import PromptsManager
@@ -1575,8 +1576,21 @@ class MainWindow(QMainWindow):
                 self.open_config()
             return
 
-        from ui.zotero_dialog import ZoteroDialog
-        first_page_text = self.pdf_doc.get_page_text(0) if self.pdf_doc.page_count > 0 else ""
+        first_page_text = self.pdf_doc.get_page_text(0) if self.pdf_doc and self.pdf_doc.page_count > 0 else ""
+
+        # If not yet resolved, perform a search before opening the dialog
+        if not self.current_zotero_item:
+            doi = ""
+            import re
+            doi_match = re.search(r'\b10\.\d{4,9}/[-._;()/:A-Za-z0-9]+', first_page_text)
+            if doi_match:
+                doi = doi_match.group(0).rstrip('.;,)')
+            title = self.pdf_doc.doc.metadata.get("title", "") if self.pdf_doc and self.pdf_doc.doc and self.pdf_doc.doc.metadata else ""
+            found = self.zotero_manager.find_item_for_pdf(self.pdf_doc.file_path, title=title, doi=doi)
+            if found:
+                self.current_zotero_item = found
+                self.zotero_btn.setText("Zotero ✓")
+
         num_pages_context = min(3, self.pdf_doc.page_count)
         context_parts = []
         for i in range(num_pages_context):
@@ -1592,15 +1606,16 @@ class MainWindow(QMainWindow):
             ai_assistant=self.ai_assistant,
             first_page_text=first_page_text,
             full_text=full_text,
-            parent=self
+            parent=self,
+            main_window=self
         )
         dialog.item_updated.connect(self._on_zotero_item_updated)
         dialog.exec()
 
     def _on_zotero_item_updated(self, item):
-        self.current_zotero_item = item
-        if item:
-            data = item.get("data", {})
+        if item and isinstance(item, dict) and (item.get("key") or item.get("data", {}).get("key")):
+            self.current_zotero_item = item
+            data = item.get("data", item)
             title = data.get("title", "Document")
             self.zotero_btn.setText("Zotero ✓")
             self.zotero_btn.setToolTip(f"Linked to Zotero: {title}\nClick to view, edit, or manage collections/notes")

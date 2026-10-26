@@ -542,6 +542,14 @@ class AIAssistant:
             logger.error(f"Failed to rank models: {e}")
             return self.ranked_models
 
+    @property
+    def is_indexed(self) -> bool:
+        """Returns True if a document is currently indexed and ready for AI queries."""
+        if self.provider == "cloud":
+            return bool(self.chat_session or self.uploaded_file)
+        else:
+            return bool(self.local_document_text)
+
     def clear_index(self):
         """Reset indexed PDF state and delete any remote file."""
         if self.uploaded_file:
@@ -996,12 +1004,14 @@ class AIAssistant:
         Uses the active AI model to analyze document text or abstract
         and generate a list of concise academic keywords / tags.
         """
-        snippet = text[:4000] if len(text) > 4000 else text
-        prompt = (
-            f"Analyze the following academic document text and extract up to {max_keywords} relevant, concise scientific keywords or tags.\n\n"
-            f"Document text:\n\"\"\"\n{snippet}\n\"\"\"\n\n"
-            "Return ONLY a comma-separated list of keywords (e.g. Deep Learning, Gene Expression, Transformer Model). Do not include numbering, bullets, or extra commentary."
-        )
+        prefix = f"Analyze the following academic document text and extract up to {max_keywords} relevant, concise scientific keywords or tags.\n\nDocument text:\n\"\"\"\n"
+        suffix = "\n\"\"\"\n\nReturn ONLY a comma-separated list of keywords (e.g. Deep Learning, Gene Expression, Transformer Model). Do not include numbering, bullets, or extra commentary."
+        
+        # Ensure the entire prompt fits comfortably within MAX_QUESTION_LENGTH
+        max_snippet_len = max(100, MAX_QUESTION_LENGTH - len(prefix) - len(suffix) - 50)
+        snippet = text[:max_snippet_len] if len(text) > max_snippet_len else text
+        prompt = f"{prefix}{snippet}{suffix}"
+
         try:
             raw_response = self.ask_direct(prompt)
             keywords = []
@@ -1013,18 +1023,109 @@ class AIAssistant:
             return keywords[:max_keywords]
         except Exception as e:
             logger.error(f"Failed to generate keywords via AI: {e}")
-            return []
+            raise
+
+    def generate_keywords_two_stage(
+        self,
+        existing_tags: Optional[List[str]] = None,
+        max_keywords: int = 8,
+        fallback_text: str = "",
+    ) -> Dict[str, Any]:
+        """
+        Two-stage keyword generation workflow:
+        1. Ask blindly: AI analyzes the indexed document and suggests scientific keywords.
+        2. Ask with existing tags: AI evaluates existing library tags and selects the best matches.
+        3. Merge the two lists so the user has consistent and relevant keywords.
+        """
+        existing_tags = existing_tags or []
+
+        # --- Stage 1: Blind keyword extraction from document ---
+        prompt_1 = (
+            f"Based on the indexed document, identify up to {max_keywords} relevant, concise scientific keywords or subject tags "
+            "that best describe its core topics, methodology, and research domain.\n\n"
+            "Return ONLY a comma-separated list of keywords (e.g. Deep Learning, Gene Expression, Transformer Model). "
+            "Do not include numbering, bullet points, or extra explanation."
+        )
+        if not self.is_indexed and fallback_text:
+            max_snippet_len = max(100, MAX_QUESTION_LENGTH - len(prompt_1) - 100)
+            snippet = fallback_text[:max_snippet_len]
+            prompt_1 = f"Document excerpt:\n\"\"\"\n{snippet}\n\"\"\"\n\n{prompt_1}"
+
+        blind_keywords = []
+        try:
+            raw_1 = self.ask_direct(prompt_1)
+            for item in raw_1.split(","):
+                cleaned = re.sub(r"^[0-9\.\-\*\s]+", "", item).strip()
+                cleaned = cleaned.strip("\"'[]{}")
+                if cleaned and len(cleaned) <= 50 and cleaned not in blind_keywords and cleaned.lower() != "none":
+                    blind_keywords.append(cleaned)
+        except Exception as e:
+            logger.error(f"Stage 1 blind keyword extraction failed: {e}")
+            raise
+
+        # --- Stage 2: Selection from existing library keywords (if any) ---
+        matched_existing = []
+        if existing_tags:
+            prefix_2 = (
+                "Here is a list of existing subject keywords/tags already present in the researcher's reference library:\n["
+            )
+            suffix_2 = (
+                "]\n\nFrom the list above, select ONLY those keywords that are directly relevant and appropriate for the indexed document.\n"
+                "If none of them match the document, respond with 'None'.\n"
+                "Return ONLY a comma-separated list of the matching existing keywords from the list above. Do not include commentary."
+            )
+            max_catalog_len = max(100, MAX_QUESTION_LENGTH - len(prefix_2) - len(suffix_2) - 50)
+            tags_catalog = []
+            curr_len = 0
+            for tag in existing_tags:
+                tag_str = str(tag).strip()
+                if not tag_str:
+                    continue
+                needed = len(tag_str) + (2 if tags_catalog else 0)
+                if curr_len + needed > max_catalog_len:
+                    break
+                tags_catalog.append(tag_str)
+                curr_len += needed
+
+            tags_catalog_str = ", ".join(tags_catalog)
+            prompt_2 = f"{prefix_2}{tags_catalog_str}{suffix_2}"
+            try:
+                raw_2 = self.ask_direct(prompt_2)
+                if raw_2.strip().lower() != "none":
+                    for item in raw_2.split(","):
+                        cleaned = re.sub(r"^[0-9\.\-\*\s]+", "", item).strip()
+                        cleaned = cleaned.strip("\"'[]{}")
+                        if not cleaned or cleaned.lower() == "none":
+                            continue
+                        canonical = next((t for t in existing_tags if t.lower() == cleaned.lower()), cleaned)
+                        if canonical and canonical not in matched_existing:
+                            matched_existing.append(canonical)
+            except Exception as e:
+                logger.warning(f"Stage 2 existing tag matching failed: {e}")
+
+        # --- Stage 3: Merge recommendations ---
+        merged = []
+        for t in matched_existing:
+            if t not in merged:
+                merged.append(t)
+        for t in blind_keywords:
+            if not any(t.lower() == m.lower() for m in merged):
+                merged.append(t)
+
+        return {
+            "blind_keywords": blind_keywords[:max_keywords],
+            "matched_existing_keywords": matched_existing,
+            "merged_ai_keywords": merged[:max_keywords * 2],
+        }
 
     def extract_bibliographic_metadata(self, first_page_text: str) -> Dict[str, Any]:
         """
         Uses the active AI model to extract bibliographic metadata (title, authors, journal, year, DOI)
         from the first page of a research paper.
         """
-        snippet = first_page_text[:4000] if len(first_page_text) > 4000 else first_page_text
-        prompt = (
-            "Extract bibliographic metadata from this research paper's first page into valid JSON.\n\n"
-            f"Text:\n\"\"\"\n{snippet}\n\"\"\"\n\n"
-            "Return a JSON object with the following fields:\n"
+        prefix = "Extract bibliographic metadata from this research paper's first page into valid JSON.\n\nText:\n\"\"\"\n"
+        suffix = (
+            "\n\"\"\"\n\nReturn a JSON object with the following fields:\n"
             "{\n"
             "  \"title\": \"Title of paper\",\n"
             "  \"creators\": [{\"firstName\": \"...\", \"lastName\": \"...\"}],\n"
@@ -1035,6 +1136,10 @@ class AIAssistant:
             "}\n"
             "Return ONLY the JSON string. If a field cannot be determined, omit it or use an empty string."
         )
+        max_snippet_len = max(100, MAX_QUESTION_LENGTH - len(prefix) - len(suffix) - 50)
+        snippet = first_page_text[:max_snippet_len] if len(first_page_text) > max_snippet_len else first_page_text
+        prompt = f"{prefix}{snippet}{suffix}"
+
         try:
             raw_response = self.ask_direct(prompt)
             json_match = re.search(r"\{.*\}", raw_response, re.DOTALL)
@@ -1043,6 +1148,6 @@ class AIAssistant:
             return json.loads(raw_response)
         except Exception as e:
             logger.error(f"Failed to extract metadata via AI: {e}")
-            return {}
+            raise
 
 

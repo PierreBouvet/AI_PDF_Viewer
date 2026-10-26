@@ -148,3 +148,187 @@ def test_zotero_test_worker_signals(qapp):
     success, msg = results[0]
     assert success is True
     assert "successfully" in msg.lower()
+
+
+def test_lookup_scientific_article_crossref_doi():
+    import json
+    import io
+    from backend.zotero_manager import lookup_scientific_article
+
+    mock_crossref_resp = {
+        "status": "ok",
+        "message": {
+            "title": ["Mastering the game of Go with deep neural networks and tree search"],
+            "container-title": ["Nature"],
+            "DOI": "10.1038/nature16961",
+            "type": "journal-article",
+            "issued": {"date-parts": [[2016, 1, 28]]},
+            "author": [
+                {"given": "David", "family": "Silver"},
+                {"given": "Aja", "family": "Huang"},
+                {"given": "Demis", "family": "Hassabis"}
+            ],
+            "abstract": "<jats:p>The game of Go has long been viewed as the most challenging of classic games.</jats:p>"
+        }
+    }
+
+    mock_resp = io.BytesIO(json.dumps(mock_crossref_resp).encode("utf-8"))
+
+    with patch("urllib.request.urlopen", return_value=mock_resp):
+        res = lookup_scientific_article(doi="10.1038/nature16961")
+        assert res is not None
+        assert res["title"] == "Mastering the game of Go with deep neural networks and tree search"
+        assert res["publicationTitle"] == "Nature"
+        assert res["date"] == "2016"
+        assert res["DOI"] == "10.1038/nature16961"
+        assert res["itemType"] == "journalArticle"
+        assert len(res["creators"]) == 3
+        assert res["creators"][0]["lastName"] == "Silver"
+        assert "The game of Go" in res["abstractNote"]
+        assert "<jats:p>" not in res["abstractNote"]
+
+
+def test_lookup_scientific_article_arxiv_fallback():
+    import io
+    from backend.zotero_manager import lookup_scientific_article
+
+    arxiv_xml = """<?xml version="1.0" encoding="utf-8"?>
+    <feed xmlns="http://www.w3.org/2005/Atom">
+      <entry>
+        <id>http://arxiv.org/abs/1706.03762v1</id>
+        <published>2017-06-12T17:57:34Z</published>
+        <title>Attention Is All You Need</title>
+        <summary>The dominant sequence transduction models are based on complex recurrent or convolutional neural networks.</summary>
+        <author><name>Ashish Vaswani</name></author>
+        <author><name>Noam Shazeer</name></author>
+      </entry>
+    </feed>"""
+
+    mock_resp = io.BytesIO(arxiv_xml.encode("utf-8"))
+
+    # Fail crossref, succeed arxiv
+    def mock_urlopen(req, timeout=10):
+        url = req.full_url if hasattr(req, "full_url") else str(req)
+        if "crossref.org" in url:
+            raise Exception("Crossref 404")
+        return mock_resp
+
+    with patch("urllib.request.urlopen", side_effect=mock_urlopen):
+        res = lookup_scientific_article(title="Attention Is All You Need", text_snippet="arXiv:1706.03762")
+        assert res is not None
+        assert res["title"] == "Attention Is All You Need"
+        assert res["publicationTitle"] == "arXiv"
+        assert res["date"] == "2017"
+        assert "1706.03762" in res["DOI"]
+        assert res["itemType"] == "preprint"
+        assert len(res["creators"]) == 2
+        assert res["creators"][0]["lastName"] == "Vaswani"
+
+
+def test_scientific_db_search_worker_signals(qapp):
+    from ui.zotero_dialog import ScientificDBSearchWorker
+    worker = ScientificDBSearchWorker(doi="10.1234/test")
+    results = []
+    worker.finished_signal.connect(lambda s, e, r: results.append((s, e, r)))
+
+    mock_result = {
+        "title": "Quantum Computation",
+        "publicationTitle": "Science",
+        "date": "2024",
+        "DOI": "10.1234/test",
+        "creators": [],
+        "abstractNote": "Test abstract"
+    }
+
+    with patch("backend.zotero_manager.lookup_scientific_article", return_value=mock_result):
+        worker.run()
+
+    assert len(results) == 1
+    success, err, data = results[0]
+    assert success is True
+    assert data["title"] == "Quantum Computation"
+
+
+def test_update_item_handles_raw_response_and_fetches_canonical_item(isolated_test_settings):
+    config = isolated_test_settings
+    config.zotero_user_id = "12345"
+    manager = ZoteroManager(config)
+
+    initial_item = {
+        "key": "ITEM_KEY_123",
+        "data": {
+            "key": "ITEM_KEY_123",
+            "title": "Original Title",
+            "tags": [{"tag": "OldTag"}],
+            "collections": []
+        }
+    }
+    updated_remote_item = {
+        "key": "ITEM_KEY_123",
+        "data": {
+            "key": "ITEM_KEY_123",
+            "title": "Original Title",
+            "tags": [{"tag": "NewTag1"}, {"tag": "NewTag2"}],
+            "collections": ["COL_A"]
+        }
+    }
+
+    mock_client = MagicMock()
+    mock_client.item.side_effect = [initial_item, updated_remote_item]
+    # In real pyzotero, update_item returns an httpx2.Response object (not a dict)
+    mock_response = MagicMock()
+    mock_response.status_code = 204
+    mock_client.update_item.return_value = mock_response
+
+    with patch.object(manager, "get_client", return_value=mock_client):
+        res = manager.update_item(
+            item_key="ITEM_KEY_123",
+            collection_keys=["COL_A"],
+            tags=["NewTag1", "NewTag2"]
+        )
+
+        assert isinstance(res, dict)
+        assert res["key"] == "ITEM_KEY_123"
+        assert len(res["data"]["tags"]) == 2
+        assert res["data"]["tags"][0]["tag"] == "NewTag1"
+        assert res["data"]["tags"][1]["tag"] == "NewTag2"
+        assert res["data"]["collections"] == ["COL_A"]
+
+
+def test_find_item_by_title_resolves_attachment_parent(isolated_test_settings):
+    config = isolated_test_settings
+    config.zotero_user_id = "12345"
+    manager = ZoteroManager(config)
+
+    attachment_item = {
+        "key": "ATT_999",
+        "data": {
+            "itemType": "attachment",
+            "parentItem": "PARENT_888",
+            "title": "nature_paper.pdf",
+            "filename": "nature_paper.pdf"
+        }
+    }
+    parent_item = {
+        "key": "PARENT_888",
+        "data": {
+            "key": "PARENT_888",
+            "itemType": "journalArticle",
+            "title": "Mastering the game of Go"
+        }
+    }
+
+    mock_client = MagicMock()
+    # 1. DOI fails or empty
+    # 2. Filename query returns empty
+    # 3. Candidate title query returns the attachment
+    mock_client.items.return_value = [attachment_item]
+    mock_client.item.return_value = parent_item
+
+    with patch.object(manager, "get_client", return_value=mock_client):
+        found = manager.find_item_for_pdf("/path/nature_paper.pdf", title="Mastering the game of Go")
+        assert found is not None
+        assert found["key"] == "PARENT_888"
+        mock_client.item.assert_called_with("PARENT_888")
+
+
