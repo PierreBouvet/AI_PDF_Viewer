@@ -1509,18 +1509,15 @@ class MainWindow(QMainWindow):
         """Asynchronously checks if the currently opened PDF is cataloged in the user's Zotero library."""
         if not self.pdf_doc or not self.pdf_doc.file_path:
             self.current_zotero_item = None
-            self.zotero_btn.setText("Zotero")
-            self.zotero_btn.setToolTip("Inspect or link document with Zotero")
+            self._update_zotero_btn_text()
             return
 
         if not self.zotero_manager.is_configured():
-            self.zotero_btn.setText("Zotero")
-            self.zotero_btn.setToolTip("Configure Zotero in Settings to link documents")
+            self._update_zotero_btn_text()
             return
 
         if not self.config.zotero_auto_check:
-            self.zotero_btn.setText("Zotero")
-            self.zotero_btn.setToolTip("Inspect or link document with Zotero")
+            self._update_zotero_btn_text()
             return
 
         if self._is_thread_running(self._zotero_check_worker):
@@ -1547,16 +1544,33 @@ class MainWindow(QMainWindow):
         self._zotero_check_worker.check_finished.connect(self._on_zotero_check_finished)
         self._zotero_check_worker.start()
 
+    def _update_zotero_btn_text(self):
+        """Updates the Zotero button text based on whether the document is in Sources and linked."""
+        if not self.pdf_doc or not self.pdf_doc.file_path:
+            self.zotero_btn.setText("Zotero")
+            self.zotero_btn.setToolTip("Inspect or link document with Zotero")
+            return
+
+        from backend.local_library_manager import is_in_sources_dir
+        sources_dir = getattr(self.config, "source_directory", "")
+        in_sources = is_in_sources_dir(self.pdf_doc.file_path, sources_dir) if sources_dir else False
+
+        if not in_sources:
+            self.zotero_btn.setText("Add article to Zotero")
+            self.zotero_btn.setToolTip("Paper not in Sources folder. Click to catalog in Zotero and organize into Sources.")
+        else:
+            if self.current_zotero_item:
+                data = self.current_zotero_item.get("data", self.current_zotero_item)
+                title = data.get("title", "Document")
+                self.zotero_btn.setText("Zotero ✓")
+                self.zotero_btn.setToolTip(f"Linked to Zotero: {title}\nClick to view, edit, or manage collections/notes")
+            else:
+                self.zotero_btn.setText("+ Zotero")
+                self.zotero_btn.setToolTip("Located in Sources, but not yet linked to Zotero. Click to add or link.")
+
     def _on_zotero_check_finished(self, item):
         self.current_zotero_item = item
-        if item:
-            data = item.get("data", {})
-            title = data.get("title", "Document")
-            self.zotero_btn.setText("Zotero ✓")
-            self.zotero_btn.setToolTip(f"Linked to Zotero: {title}\nClick to view, edit, or manage collections/notes")
-        else:
-            self.zotero_btn.setText("+ Zotero")
-            self.zotero_btn.setToolTip("Not found in Zotero. Click to add document, metadata, or collections.")
+        self._update_zotero_btn_text()
 
     def open_zotero_dialog(self):
         """Opens the Zotero management dialog for the currently loaded PDF."""
@@ -1589,7 +1603,7 @@ class MainWindow(QMainWindow):
             found = self.zotero_manager.find_item_for_pdf(self.pdf_doc.file_path, title=title, doi=doi)
             if found:
                 self.current_zotero_item = found
-                self.zotero_btn.setText("Zotero ✓")
+                self._update_zotero_btn_text()
 
         num_pages_context = min(3, self.pdf_doc.page_count)
         context_parts = []
@@ -1617,9 +1631,129 @@ class MainWindow(QMainWindow):
             self.current_zotero_item = item
             data = item.get("data", item)
             title = data.get("title", "Document")
-            self.zotero_btn.setText("Zotero ✓")
-            self.zotero_btn.setToolTip(f"Linked to Zotero: {title}\nClick to view, edit, or manage collections/notes")
+            self._update_zotero_btn_text()
             self.add_log(f"Zotero item updated: {title}")
+
+            # If document is not in Sources, prompt the user to move it to Sources
+            from backend.local_library_manager import is_in_sources_dir
+            sources_dir = getattr(self.config, "source_directory", "")
+            if sources_dir and self.pdf_doc and self.pdf_doc.file_path and not is_in_sources_dir(self.pdf_doc.file_path, sources_dir):
+                self._prompt_move_to_sources(item)
+
+    def _prompt_move_to_sources(self, item: dict):
+        """Prompts user to move the newly cataloged article to the Sources directory with standardized nomenclature."""
+        from backend.local_library_manager import LocalLibraryManager
+        sources_dir = getattr(self.config, "source_directory", "")
+        if not sources_dir or not self.pdf_doc or not self.pdf_doc.file_path:
+            return
+
+        mgr = LocalLibraryManager(sources_dir)
+        data = item.get("data", item)
+        title = data.get("title") or (self.pdf_doc.doc.metadata.get("title") if self.pdf_doc.doc and self.pdf_doc.doc.metadata else "Document")
+        creators = data.get("creators", [])
+        year = str(data.get("date", ""))
+        doi = data.get("DOI", "")
+        zotero_key = item.get("key") or data.get("key", "")
+
+        plan = mgr.prepare_move_plan(
+            current_pdf_path=self.pdf_doc.file_path,
+            title=title,
+            creators=creators,
+            year=year,
+            doi=doi,
+            zotero_key=zotero_key
+        )
+
+        status = plan["status"]
+        if status == "already_in_sources":
+            return
+
+        elif status == "identical_file_exists":
+            msg = QMessageBox(self)
+            msg.setWindowTitle("Article Already in Sources")
+            msg.setIcon(QMessageBox.Icon.Information)
+            msg.setText(
+                "An identical copy of this article already exists in your Sources directory:\n\n"
+                f"{os.path.basename(plan['existing_file_path'])}\n\n"
+                "Would you like to switch to the existing file in Sources?"
+            )
+            btn_switch = msg.addButton("Switch to Sources File", QMessageBox.ButtonRole.AcceptRole)
+            btn_cancel = msg.addButton("Keep Current File", QMessageBox.ButtonRole.RejectRole)
+            msg.exec()
+            if msg.clickedButton() == btn_switch:
+                self.load_pdf(plan["existing_file_path"])
+            return
+
+        elif status == "name_collision":
+            msg = QMessageBox(self)
+            msg.setWindowTitle("Filename Collision")
+            msg.setIcon(QMessageBox.Icon.Question)
+            msg.setText(
+                f"A different file named '{plan['candidate_filename']}' already exists in Sources.\n\n"
+                f"Would you like to move this document as '{plan['suggested_numbered_filename']}', "
+                f"or switch to the existing file?"
+            )
+            btn_save_numbered = msg.addButton(f"Move as {plan['suggested_numbered_filename']}", QMessageBox.ButtonRole.AcceptRole)
+            btn_open_existing = msg.addButton("Open Existing", QMessageBox.ButtonRole.ActionRole)
+            btn_cancel = msg.addButton("Cancel", QMessageBox.ButtonRole.RejectRole)
+            msg.exec()
+
+            if msg.clickedButton() == btn_save_numbered:
+                dest_path = plan["numbered_target_path"]
+                final_path = mgr.execute_move(
+                    source_path=self.pdf_doc.file_path,
+                    destination_path=dest_path,
+                    title=title,
+                    creators=creators,
+                    year=year,
+                    doi=doi,
+                    zotero_key=zotero_key,
+                    sha256_hash=plan["sha256"]
+                )
+                self._switch_open_document_to_sources(final_path)
+            elif msg.clickedButton() == btn_open_existing:
+                self.load_pdf(plan["existing_file_path"])
+            return
+
+        else:  # status == "ready"
+            msg = QMessageBox(self)
+            msg.setWindowTitle("Store Article in Sources?")
+            msg.setIcon(QMessageBox.Icon.Question)
+            msg.setText(
+                "Would you like to move this article into your Sources directory?\n\n"
+                f"New Filename:\n{plan['candidate_filename']}\n\n"
+                f"Destination:\n{sources_dir}"
+            )
+            btn_yes = msg.addButton("Move to Sources", QMessageBox.ButtonRole.AcceptRole)
+            btn_no = msg.addButton("Keep in Current Location", QMessageBox.ButtonRole.RejectRole)
+            msg.exec()
+
+            if msg.clickedButton() == btn_yes:
+                final_path = mgr.execute_move(
+                    source_path=self.pdf_doc.file_path,
+                    destination_path=plan["target_path"],
+                    title=title,
+                    creators=creators,
+                    year=year,
+                    doi=doi,
+                    zotero_key=zotero_key,
+                    sha256_hash=plan["sha256"]
+                )
+                self._switch_open_document_to_sources(final_path)
+
+    def _switch_open_document_to_sources(self, new_path: str):
+        """Seamlessly updates the active document in the viewer to the new Sources path."""
+        if not os.path.exists(new_path):
+            return
+
+        if self.pdf_doc:
+            self.pdf_doc.file_path = new_path
+
+        pdf_name = os.path.basename(new_path)
+        self.setWindowTitle(pdf_name)
+        self.add_log(f"Moved to Sources: {pdf_name}")
+        self._update_zotero_btn_text()
+        self.update_save_action_state()
 
     def save_chat_response_to_zotero(self, msg_data: dict):
         """Saves a generated AI chat message as a rich HTML note on the linked Zotero item."""

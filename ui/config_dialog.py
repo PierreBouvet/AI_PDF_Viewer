@@ -459,10 +459,55 @@ class ConfigDialog(QDialog):
         self.auto_zoom_check.setChecked(True)
         self.auto_zoom_check.setEnabled(False) # Fixed native feature
         form.addRow("View behavior:", self.auto_zoom_check)
+
+        # Bibliography & Local Storage Section
+        sep = QFrame()
+        sep.setFrameShape(QFrame.Shape.HLine)
+        sep.setStyleSheet("color: #e5e5ea; margin-top: 6px; margin-bottom: 6px;")
+        form.addRow(sep)
+
+        sources_header = QLabel("<b>Bibliography & Local Storage</b>")
+        sources_header.setStyleSheet("font-size: 10pt; color: #1c1c1e;")
+        sources_desc = QLabel("Centralized folder where scientific papers are renamed and archived.")
+        sources_desc.setStyleSheet("color: #636366; font-size: 8.5pt;")
+        form.addRow(sources_header)
+        form.addRow(sources_desc)
+
+        sources_layout = QHBoxLayout()
+        self.sources_dir_input = QLineEdit()
+        self.sources_dir_input.setText(self.config.source_directory)
+        self.btn_browse_sources = QPushButton("Browse...")
+        self.btn_browse_sources.clicked.connect(self._browse_sources_dir)
+        sources_layout.addWidget(self.sources_dir_input, 1)
+        sources_layout.addWidget(self.btn_browse_sources)
+        form.addRow("Sources folder:", sources_layout)
+
+        scan_layout = QHBoxLayout()
+        self.btn_scan_sources = QPushButton("Scan Directory for Zotero Links")
+        self.btn_scan_sources.setStyleSheet("font-weight: 600; padding: 6px 14px;")
+        self.btn_scan_sources.clicked.connect(self._open_scan_sources_dialog)
+        scan_layout.addWidget(self.btn_scan_sources)
+        scan_layout.addStretch()
+        form.addRow("", scan_layout)
         
         layout.addLayout(form)
         layout.addStretch()
         return page
+
+    def _browse_sources_dir(self):
+        curr = self.sources_dir_input.text().strip() or os.path.expanduser("~/Documents")
+        chosen = QFileDialog.getExistingDirectory(self, "Select Sources Directory", curr)
+        if chosen:
+            self.sources_dir_input.setText(chosen)
+
+    def _open_scan_sources_dialog(self):
+        sources = self.sources_dir_input.text().strip()
+        if not sources or not os.path.isdir(sources):
+            QMessageBox.warning(self, "Invalid Directory", f"The directory '{sources}' does not exist.")
+            return
+        from ui.zotero_scan_dialog import ZoteroScanDialog
+        dlg = ZoteroScanDialog(sources_dir=sources, parent=self)
+        dlg.exec()
 
     def _on_theme_selection_changed(self):
         style = self.style_combo.currentText()
@@ -1180,6 +1225,8 @@ class ConfigDialog(QDialog):
         
         self.config.app_style = self.style_combo.currentText()
         self.config.color_mode = self.mode_combo.currentText()
+        if hasattr(self, "sources_dir_input") and self.sources_dir_input is not None:
+            self.config.source_directory = self.sources_dir_input.text().strip()
         
         if self.radio_local.isChecked():
             self.config.ai_provider = "local"

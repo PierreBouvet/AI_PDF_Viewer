@@ -1,3 +1,4 @@
+import os
 from PySide6.QtCore import QSettings
 
 # Default fallback model when no specific model has been selected or saved.
@@ -190,6 +191,18 @@ class ConfigManager:
     @local_timeout_sec.setter
     def local_timeout_sec(self, value: int):
         self.settings.setValue("local_timeout_sec", int(value))
+        self.settings.sync()
+
+    @property
+    def source_directory(self) -> str:
+        """Directory path where organized bibliography source files are stored."""
+        default_dir = os.path.expanduser("~/Documents/Bibliographie/Sources")
+        val = str(self.settings.value("source_directory", default_dir)).strip()
+        return val or default_dir
+
+    @source_directory.setter
+    def source_directory(self, value: str):
+        self.settings.setValue("source_directory", str(value).strip())
         self.settings.sync()
 
 

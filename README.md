@@ -18,6 +18,11 @@ For local models, the situation is a bit different, it mainly depends on your ha
 
 Finally, note that **this application is made to help you read documents faster and better and should not be used to replace you reading the article**. I strongly encourage you to see this application as a "facilitator": a way to read and interact directly with scientific literature.
 
+## New in v1.2-beta
+
+- **Zotero integration**: Articles are automatically added to the Zotero account of the user via the Zotero API. The application currently only supports standalone Zotero accounts.
+- **Local file storage**: Articles can automatically be renamed and moved to a specified folder in the user's system.
+
 ## New in v1.1-beta
 
 - **Academic AI Provider (Institutional ChatGPT)**: Connect to institutional AI endpoints (e.g., `https://meduniwien-api.academic-ai.at`) with custom base URL, Client ID, and Client Secret stored securely in macOS Keychain / system keyring. Dynamically discover and select from authorized ChatGPT models with automatic CA certificate verification.
