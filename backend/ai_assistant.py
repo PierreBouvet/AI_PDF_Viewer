@@ -1,4 +1,5 @@
 import os
+import re
 import json
 import urllib.request
 import urllib.error
@@ -6,7 +7,7 @@ import subprocess
 import shutil
 import time
 from datetime import datetime, timedelta
-from typing import Optional
+from typing import Optional, List, Dict, Any
 from google import genai
 from google.genai import types
 from PySide6.QtCore import QSettings
@@ -989,5 +990,59 @@ class AIAssistant:
                 response = chat.send_message(question)
                 
             return response.text
+
+    def generate_keywords(self, text: str, max_keywords: int = 8) -> List[str]:
+        """
+        Uses the active AI model to analyze document text or abstract
+        and generate a list of concise academic keywords / tags.
+        """
+        snippet = text[:4000] if len(text) > 4000 else text
+        prompt = (
+            f"Analyze the following academic document text and extract up to {max_keywords} relevant, concise scientific keywords or tags.\n\n"
+            f"Document text:\n\"\"\"\n{snippet}\n\"\"\"\n\n"
+            "Return ONLY a comma-separated list of keywords (e.g. Deep Learning, Gene Expression, Transformer Model). Do not include numbering, bullets, or extra commentary."
+        )
+        try:
+            raw_response = self.ask_direct(prompt)
+            keywords = []
+            for item in raw_response.split(","):
+                cleaned = re.sub(r"^[0-9\.\-\*\s]+", "", item).strip()
+                cleaned = cleaned.strip("\"'[]{}")
+                if cleaned and len(cleaned) <= 50 and cleaned not in keywords:
+                    keywords.append(cleaned)
+            return keywords[:max_keywords]
+        except Exception as e:
+            logger.error(f"Failed to generate keywords via AI: {e}")
+            return []
+
+    def extract_bibliographic_metadata(self, first_page_text: str) -> Dict[str, Any]:
+        """
+        Uses the active AI model to extract bibliographic metadata (title, authors, journal, year, DOI)
+        from the first page of a research paper.
+        """
+        snippet = first_page_text[:4000] if len(first_page_text) > 4000 else first_page_text
+        prompt = (
+            "Extract bibliographic metadata from this research paper's first page into valid JSON.\n\n"
+            f"Text:\n\"\"\"\n{snippet}\n\"\"\"\n\n"
+            "Return a JSON object with the following fields:\n"
+            "{\n"
+            "  \"title\": \"Title of paper\",\n"
+            "  \"creators\": [{\"firstName\": \"...\", \"lastName\": \"...\"}],\n"
+            "  \"publicationTitle\": \"Journal or Conference name\",\n"
+            "  \"date\": \"Year (YYYY)\",\n"
+            "  \"DOI\": \"10.xxxx/...\",\n"
+            "  \"abstractNote\": \"Short abstract if present\"\n"
+            "}\n"
+            "Return ONLY the JSON string. If a field cannot be determined, omit it or use an empty string."
+        )
+        try:
+            raw_response = self.ask_direct(prompt)
+            json_match = re.search(r"\{.*\}", raw_response, re.DOTALL)
+            if json_match:
+                return json.loads(json_match.group(0))
+            return json.loads(raw_response)
+        except Exception as e:
+            logger.error(f"Failed to extract metadata via AI: {e}")
+            return {}
 
 

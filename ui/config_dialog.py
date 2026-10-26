@@ -38,6 +38,8 @@ def get_tab_icon(icon_name: str, fallback_glyph: str, size: int = 24) -> QIcon:
         name_variants.extend(["sparkles", "Sparkles", "brain", "Brain"])
     elif icon_name.lower() == "chatbox":
         name_variants.extend(["chat", "Chat", "message", "Message"])
+    elif icon_name.lower() == "zotero":
+        name_variants.extend(["zotero", "Zotero", "book", "library"])
 
     for ext in [".svg", ".png", ".jpg", ".jpeg", ".ico"]:
         for variant in name_variants:
@@ -227,6 +229,29 @@ class AcademicModelFetcherThread(QThread):
             self.error_occurred.emit(str(e))
 
 
+class ZoteroTestWorker(QThread):
+    result_ready = Signal(bool, str)
+
+    def __init__(self, user_id: str, api_key: str, library_type: str = "user", parent=None):
+        super().__init__(parent)
+        self.user_id = user_id
+        self.api_key = api_key
+        self.library_type = library_type
+
+    def run(self):
+        try:
+            from pyzotero import zotero
+            zot = zotero.Zotero(self.user_id, self.library_type, self.api_key)
+            cols = zot.collections(limit=1)
+            self.result_ready.emit(True, f"Connected to {self.library_type} library {self.user_id} successfully!")
+        except Exception as e:
+            err = str(e)
+            if "403" in err:
+                err = "403 Forbidden: Invalid API key or missing permissions."
+            elif "400" in err:
+                err = f"400 Bad Request: Check User ID ({self.user_id})."
+            self.result_ready.emit(False, f"Connection failed: {err}")
+
 
 class ConfigDialog(QDialog):
     theme_preview_requested = Signal(str, str)
@@ -236,12 +261,14 @@ class ConfigDialog(QDialog):
         self.fetcher = None
         self.local_fetcher = None
         self.academic_fetcher = None
+        self.zotero_test_worker = None
         self.setWindowTitle("Settings")
         self.setFixedSize(540, 520)
         
         self.config = ConfigManager()
         self.key_was_changed = False
         self.academic_keys_were_changed = False
+        self.zotero_keys_were_changed = False
         
         # Read initial API key directly from keychain if not explicitly provided
         if current_api_key is not None:
@@ -266,6 +293,15 @@ class ConfigDialog(QDialog):
             self._initial_academic_client_id = os.environ.get("CLIENT_ID", "").strip()
         if not self._initial_academic_client_secret:
             self._initial_academic_client_secret = os.environ.get("CLIENT_SECRET", "").strip()
+
+        # Read initial Zotero credentials from keychain
+        try:
+            import keyring
+            self._initial_zotero_key = keyring.get_password("AIPDFViewer", "zotero_api_key") or ""
+        except Exception:
+            self._initial_zotero_key = ""
+        if not self._initial_zotero_key:
+            self._initial_zotero_key = os.environ.get("ZOTERO_API_KEY", "").strip()
         
         # Main layout
         main_layout = QVBoxLayout(self)
@@ -284,14 +320,17 @@ class ConfigDialog(QDialog):
         self.btn_general = MacTabButton("General", get_tab_icon("general", "⚙️"))
         self.btn_ai = MacTabButton("AI", get_tab_icon("ai", "✨"))
         self.btn_chatbox = MacTabButton("Chatbox", get_tab_icon("chatbox", "💬"))
+        self.btn_zotero = MacTabButton("Zotero", get_tab_icon("zotero", "📚"))
         
         self.tab_group.addButton(self.btn_general, 0)
         self.tab_group.addButton(self.btn_ai, 1)
         self.tab_group.addButton(self.btn_chatbox, 2)
+        self.tab_group.addButton(self.btn_zotero, 3)
         
         tab_bar_layout.addWidget(self.btn_general)
         tab_bar_layout.addWidget(self.btn_ai)
         tab_bar_layout.addWidget(self.btn_chatbox)
+        tab_bar_layout.addWidget(self.btn_zotero)
         main_layout.addLayout(tab_bar_layout)
         
         # Separator Line
@@ -306,10 +345,12 @@ class ConfigDialog(QDialog):
         self.page_general = self._create_general_page()
         self.page_ai = self._create_ai_page()
         self.page_chatbox = self._create_chatbox_page()
+        self.page_zotero = self._create_zotero_page()
         
         self.stack.addWidget(self.page_general)
         self.stack.addWidget(self.page_ai)
         self.stack.addWidget(self.page_chatbox)
+        self.stack.addWidget(self.page_zotero)
         
         main_layout.addWidget(self.stack)
         
@@ -323,6 +364,9 @@ class ConfigDialog(QDialog):
         elif initial_tab == 2:
             self.btn_chatbox.setChecked(True)
             self.stack.setCurrentIndex(2)
+        elif initial_tab == 3:
+            self.btn_zotero.setChecked(True)
+            self.stack.setCurrentIndex(3)
         else:
             self.btn_general.setChecked(True)
             self.stack.setCurrentIndex(0)
@@ -851,6 +895,154 @@ class ConfigDialog(QDialog):
         layout.addStretch()
         return page
 
+    def _create_zotero_page(self) -> QWidget:
+        page = QWidget()
+        layout = QVBoxLayout(page)
+        layout.setContentsMargins(12, 10, 12, 10)
+        layout.setSpacing(14)
+
+        header = QLabel("<b>Zotero Account Integration</b>")
+        header.setStyleSheet("font-size: 11pt; color: #1c1c1e;")
+        desc = QLabel("Link your Zotero library to check paper presence, upload PDFs, organize collections, and sync notes.")
+        desc.setStyleSheet("color: #636366; font-size: 9.5pt;")
+        layout.addWidget(header)
+        layout.addWidget(desc)
+
+        form = QFormLayout()
+        form.setContentsMargins(0, 4, 0, 0)
+        form.setSpacing(10)
+        form.setLabelAlignment(Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter)
+
+        # User ID
+        self.zotero_uid_input = QLineEdit(self.config.zotero_user_id)
+        self.zotero_uid_input.setPlaceholderText("e.g. 1234567")
+        self.zotero_uid_input.setStyleSheet("""
+            QLineEdit {
+                border: 1px solid #d1d1d6;
+                border-radius: 5px;
+                padding: 5px 8px;
+                background-color: #ffffff;
+                color: #1c1c1e;
+            }
+            QLineEdit:focus {
+                border: 1px solid #007aff;
+            }
+        """)
+        form.addRow("User ID:", self.zotero_uid_input)
+
+        # API Key
+        self.zotero_key_input = QLineEdit(self._initial_zotero_key)
+        self.zotero_key_input.setEchoMode(QLineEdit.EchoMode.Password)
+        self.zotero_key_input.setPlaceholderText("Paste your Personal API Key...")
+        self.zotero_key_input.setStyleSheet("""
+            QLineEdit {
+                border: 1px solid #d1d1d6;
+                border-radius: 5px;
+                padding: 5px 8px;
+                background-color: #ffffff;
+                color: #1c1c1e;
+            }
+            QLineEdit:focus {
+                border: 1px solid #007aff;
+            }
+        """)
+        form.addRow("API Key:", self.zotero_key_input)
+
+        # Library Type
+        self.zotero_lib_combo = QComboBox()
+        self.zotero_lib_combo.addItems(["User Library", "Group Library"])
+        if self.config.zotero_library_type == "group":
+            self.zotero_lib_combo.setCurrentIndex(1)
+        else:
+            self.zotero_lib_combo.setCurrentIndex(0)
+        self.zotero_lib_combo.setStyleSheet("""
+            QComboBox {
+                border: 1px solid #d1d1d6;
+                border-radius: 5px;
+                padding: 4px 8px;
+                background-color: #ffffff;
+                color: #1c1c1e;
+            }
+        """)
+        form.addRow("Library Type:", self.zotero_lib_combo)
+
+        # Auto-check checkbox
+        self.zotero_auto_check = QCheckBox("Automatically check if opened PDFs are in Zotero")
+        self.zotero_auto_check.setChecked(self.config.zotero_auto_check)
+        self.zotero_auto_check.setStyleSheet("color: #1c1c1e; font-size: 9.5pt;")
+        form.addRow("", self.zotero_auto_check)
+
+        layout.addLayout(form)
+
+        # Helper link
+        help_label = QLabel(
+            '<a href="https://www.zotero.org/settings/keys" style="color: #007aff; text-decoration: none;">'
+            '🔑 Create or view your Zotero API Keys & User ID at zotero.org &rarr;</a>'
+        )
+        help_label.setOpenExternalLinks(True)
+        help_label.setStyleSheet("font-size: 9pt; margin-top: 2px;")
+        layout.addWidget(help_label)
+
+        # Test Connection Section
+        test_frame = QFrame()
+        test_frame.setStyleSheet("background-color: #f2f2f7; border-radius: 6px; padding: 6px;")
+        test_layout = QHBoxLayout(test_frame)
+        test_layout.setContentsMargins(8, 6, 8, 6)
+        test_layout.setSpacing(10)
+
+        self.zotero_test_btn = QPushButton("Test Connection")
+        self.zotero_test_btn.setStyleSheet("""
+            QPushButton {
+                background-color: #007aff;
+                color: #ffffff;
+                font-weight: 500;
+                border: none;
+                border-radius: 5px;
+                padding: 6px 14px;
+            }
+            QPushButton:hover {
+                background-color: #0062cc;
+            }
+            QPushButton:disabled {
+                background-color: #b0b0b5;
+            }
+        """)
+        self.zotero_test_btn.clicked.connect(self._test_zotero_connection)
+        test_layout.addWidget(self.zotero_test_btn)
+
+        self.zotero_test_status = QLabel("Ready to test.")
+        self.zotero_test_status.setWordWrap(True)
+        self.zotero_test_status.setStyleSheet("font-size: 9.5pt; color: #636366;")
+        test_layout.addWidget(self.zotero_test_status, 1)
+
+        layout.addWidget(test_frame)
+        layout.addStretch()
+        return page
+
+    def _test_zotero_connection(self):
+        uid = self.zotero_uid_input.text().strip()
+        key = self.zotero_key_input.text().strip()
+        lib_type = "group" if self.zotero_lib_combo.currentIndex() == 1 else "user"
+        if not uid or not key:
+            self.zotero_test_status.setText("<span style='color: #c93b2b;'>Please enter both User ID and API Key.</span>")
+            return
+
+        self.zotero_test_btn.setEnabled(False)
+        self.zotero_test_btn.setText("Connecting...")
+        self.zotero_test_status.setText("Testing connection...")
+
+        self.zotero_test_worker = ZoteroTestWorker(uid, key, lib_type, parent=self)
+        self.zotero_test_worker.result_ready.connect(self._on_zotero_test_result)
+        self.zotero_test_worker.start()
+
+    def _on_zotero_test_result(self, success: bool, message: str):
+        self.zotero_test_btn.setEnabled(True)
+        self.zotero_test_btn.setText("Test Connection")
+        if success:
+            self.zotero_test_status.setText(f"<span style='color: #2e7d32;'>✓ {message}</span>")
+        else:
+            self.zotero_test_status.setText(f"<span style='color: #c93b2b;'>✗ {message}</span>")
+
     def _update_preview(self):
         font_family = self.font_combo.currentFont().family()
         font_size = self.size_spin.value()
@@ -915,6 +1107,11 @@ class ConfigDialog(QDialog):
                 self.academic_fetcher.wait(500)
         except Exception:
             pass
+        try:
+            if self.zotero_test_worker is not None and shiboken6.isValid(self.zotero_test_worker) and self.zotero_test_worker.isRunning():
+                self.zotero_test_worker.wait(500)
+        except Exception:
+            pass
         super().done(r)
 
     def accept(self):
@@ -956,6 +1153,25 @@ class ConfigDialog(QDialog):
                         pass
             except Exception as e:
                 logger.error(f"Failed to save academic credentials to keychain: {e}")
+
+        new_zot_key = self.zotero_key_input.text().strip()
+        if new_zot_key != self._initial_zotero_key:
+            self.zotero_keys_were_changed = True
+            try:
+                import keyring
+                if new_zot_key:
+                    keyring.set_password("AIPDFViewer", "zotero_api_key", new_zot_key)
+                else:
+                    try:
+                        keyring.delete_password("AIPDFViewer", "zotero_api_key")
+                    except Exception:
+                        pass
+            except Exception as e:
+                logger.error(f"Failed to save Zotero API key to keychain: {e}")
+
+        self.config.zotero_user_id = self.zotero_uid_input.text().strip()
+        self.config.zotero_library_type = "group" if self.zotero_lib_combo.currentIndex() == 1 else "user"
+        self.config.zotero_auto_check = self.zotero_auto_check.isChecked()
 
         self.config.academic_base_url = self.academic_url_input.text().strip() or "https://meduniwien-api.academic-ai.at"
         selected_academic = self.academic_model_combo.currentText().strip()

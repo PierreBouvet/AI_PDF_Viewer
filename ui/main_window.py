@@ -316,6 +316,25 @@ class StartupTaskThread(QThread):
         except Exception as e:
             self.error.emit(f"Failed to rank models at startup: {e}")
 
+class ZoteroCheckWorker(QThread):
+    check_finished = Signal(object)
+
+    def __init__(self, zotero_manager, pdf_path: str, title: str = "", doi: str = ""):
+        super().__init__()
+        self.zotero_manager = zotero_manager
+        self.pdf_path = pdf_path
+        self.title = title
+        self.doi = doi
+
+    def run(self):
+        try:
+            item = self.zotero_manager.find_item_for_pdf(self.pdf_path, title=self.title, doi=self.doi)
+            self.check_finished.emit(item)
+        except Exception as e:
+            logger.warning(f"Background Zotero check failed: {e}")
+            self.check_finished.emit(None)
+
+
 from PySide6.QtWidgets import QWidget
 
 class MainWindow(QMainWindow):
@@ -326,6 +345,10 @@ class MainWindow(QMainWindow):
         self.setAcceptDrops(True)
         
         self.config = ConfigManager()
+        from backend.zotero_manager import ZoteroManager
+        self.zotero_manager = ZoteroManager(self.config)
+        self.current_zotero_item = None
+        self._zotero_check_worker = None
         self.last_pdf_dir = getattr(self.config, "last_opened_dir", "") or ""
         saved_model_name = self.config.model_name
         self.ai_font_family = self.config.ai_font_family
@@ -460,6 +483,13 @@ class MainWindow(QMainWindow):
         self.pdf_only_action.clicked.connect(self.toggle_pdf_only)
         self.toolbar.addWidget(self.pdf_only_action)
         
+        self.toolbar.addSeparator()
+        
+        self.zotero_btn = QPushButton("Zotero")
+        self.zotero_btn.setToolTip("Inspect or link document with Zotero")
+        self.zotero_btn.clicked.connect(self.open_zotero_dialog)
+        self.toolbar.addWidget(self.zotero_btn)
+        
         spacer = QWidget()
         spacer.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Preferred)
         self.toolbar.addWidget(spacer)
@@ -488,6 +518,7 @@ class MainWindow(QMainWindow):
         self.chat_panel.open_prompts_dialog.connect(self.open_prompts_dialog)
         self.chat_panel.save_requested.connect(self.save_markdown_response)
         self.chat_panel.append_requested.connect(self.append_response_to_pdf)
+        self.chat_panel.save_to_zotero_requested.connect(self.save_chat_response_to_zotero)
         self.chat_panel.index_requested.connect(self.index_current_document)
         self.thumbnail_panel.page_selected.connect(self.go_to_page)
         self.thumbnail_panel.toggle_inclusion_requested.connect(self.toggle_page_inclusion)
@@ -729,6 +760,9 @@ class MainWindow(QMainWindow):
                 else:
                     self.add_log("API Key updated. Please re-index the document.")
                     QMessageBox.information(self, "API Key Updated", "API key updated successfully.\nPlease re-index the document to continue.")
+
+            if getattr(dialog, "zotero_keys_were_changed", False):
+                self._check_zotero_status_for_current_document()
         else:
             # Revert theme preview back to saved configuration
             self.update_ui_theme(preview_style=old_style, preview_mode=old_mode)
@@ -942,7 +976,7 @@ class MainWindow(QMainWindow):
             
         # Collect all active / tracked threads for cleanup
         all_threads = list(self.zombie_threads)
-        for attr in ("worker", "indexer", "startup_thread", "_save_worker"):
+        for attr in ("worker", "indexer", "startup_thread", "_save_worker", "_zotero_check_worker"):
             t = getattr(self, attr, None)
             if t and self._is_thread_running(t):
                 all_threads.append(t)
@@ -950,7 +984,7 @@ class MainWindow(QMainWindow):
         for thread in all_threads:
             try:
                 # Disconnect signals to avoid callbacks during shutdown
-                for sig_name in ("result_ready", "error", "finished", "models_ranked", "save_finished"):
+                for sig_name in ("result_ready", "error", "finished", "models_ranked", "save_finished", "check_finished"):
                     if hasattr(thread, sig_name):
                         try:
                             getattr(thread, sig_name).disconnect()
@@ -969,6 +1003,7 @@ class MainWindow(QMainWindow):
         self.indexer = None
         self.startup_thread = None
         self._save_worker = None
+        self._zotero_check_worker = None
 
         # Release local AI models from memory (RAM / VRAM) on shutdown
         try:
@@ -1008,6 +1043,9 @@ class MainWindow(QMainWindow):
         self.ai_assistant.reset_client()
         self.excluded_pages.clear()
         self.included_pages.clear()
+        self.current_zotero_item = None
+        self.zotero_btn.setText("Zotero")
+        self.zotero_btn.setToolTip("Inspect or link document with Zotero")
         
         if self.pdf_doc.load(file_path):
             self.pdf_container.setCurrentIndex(1)
@@ -1030,6 +1068,7 @@ class MainWindow(QMainWindow):
             self.chat_panel.show_index_button()
             self.add_log(f"PDF loaded: {pdf_name}")
             self.update_save_action_state()
+            self._check_zotero_status_for_current_document()
         else:
             self.setWindowTitle("AI-Enhanced PDF Viewer")
             self.update_save_action_state()
@@ -1464,3 +1503,155 @@ class MainWindow(QMainWindow):
         timestamp = datetime.now().strftime("%H:%M:%S")
         self.log_list.addItem(f"[{timestamp}] {message}")
         self.log_list.scrollToBottom()
+
+    def _check_zotero_status_for_current_document(self):
+        """Asynchronously checks if the currently opened PDF is cataloged in the user's Zotero library."""
+        if not self.pdf_doc or not self.pdf_doc.file_path:
+            self.current_zotero_item = None
+            self.zotero_btn.setText("Zotero")
+            self.zotero_btn.setToolTip("Inspect or link document with Zotero")
+            return
+
+        if not self.zotero_manager.is_configured():
+            self.zotero_btn.setText("Zotero")
+            self.zotero_btn.setToolTip("Configure Zotero in Settings to link documents")
+            return
+
+        if not self.config.zotero_auto_check:
+            self.zotero_btn.setText("Zotero")
+            self.zotero_btn.setToolTip("Inspect or link document with Zotero")
+            return
+
+        if self._is_thread_running(self._zotero_check_worker):
+            thread = self._zotero_check_worker
+            self.zombie_threads.add(thread)
+            thread.finished.connect(lambda t=thread: self.zombie_threads.discard(t))
+        self._zotero_check_worker = None
+
+        import re
+        pdf_path = self.pdf_doc.file_path
+        first_page_text = self.pdf_doc.get_page_text(0) if self.pdf_doc.page_count > 0 else ""
+        doi = ""
+        doi_match = re.search(r'\b10\.\d{4,9}/[-._;()/:A-Za-z0-9]+', first_page_text)
+        if doi_match:
+            doi = doi_match.group(0).rstrip('.;,)')
+        title = ""
+        if self.pdf_doc.doc:
+            title = self.pdf_doc.doc.metadata.get("title", "") if self.pdf_doc.doc.metadata else ""
+
+        self.zotero_btn.setText("Checking Zotero...")
+        self.zotero_btn.setToolTip("Searching for item in Zotero library...")
+
+        self._zotero_check_worker = ZoteroCheckWorker(self.zotero_manager, pdf_path, title=title, doi=doi)
+        self._zotero_check_worker.check_finished.connect(self._on_zotero_check_finished)
+        self._zotero_check_worker.start()
+
+    def _on_zotero_check_finished(self, item):
+        self.current_zotero_item = item
+        if item:
+            data = item.get("data", {})
+            title = data.get("title", "Document")
+            self.zotero_btn.setText("Zotero ✓")
+            self.zotero_btn.setToolTip(f"Linked to Zotero: {title}\nClick to view, edit, or manage collections/notes")
+        else:
+            self.zotero_btn.setText("+ Zotero")
+            self.zotero_btn.setToolTip("Not found in Zotero. Click to add document, metadata, or collections.")
+
+    def open_zotero_dialog(self):
+        """Opens the Zotero management dialog for the currently loaded PDF."""
+        if not self.pdf_doc or not self.pdf_doc.file_path:
+            QMessageBox.information(self, "No Document", "Please open a PDF document first.")
+            return
+
+        if not self.zotero_manager.is_configured():
+            reply = QMessageBox.question(
+                self,
+                "Zotero Not Configured",
+                "Zotero integration requires your Zotero User ID and API Key.\n\n"
+                "Would you like to open Settings now to configure Zotero?",
+                QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No
+            )
+            if reply == QMessageBox.StandardButton.Yes:
+                self.open_config()
+            return
+
+        from ui.zotero_dialog import ZoteroDialog
+        first_page_text = self.pdf_doc.get_page_text(0) if self.pdf_doc.page_count > 0 else ""
+        num_pages_context = min(3, self.pdf_doc.page_count)
+        context_parts = []
+        for i in range(num_pages_context):
+            txt = self.pdf_doc.get_page_text(i)
+            if txt:
+                context_parts.append(txt)
+        full_text = "\n\n".join(context_parts)
+
+        dialog = ZoteroDialog(
+            pdf_path=self.pdf_doc.file_path,
+            zotero_item=self.current_zotero_item,
+            zotero_manager=self.zotero_manager,
+            ai_assistant=self.ai_assistant,
+            first_page_text=first_page_text,
+            full_text=full_text,
+            parent=self
+        )
+        dialog.item_updated.connect(self._on_zotero_item_updated)
+        dialog.exec()
+
+    def _on_zotero_item_updated(self, item):
+        self.current_zotero_item = item
+        if item:
+            data = item.get("data", {})
+            title = data.get("title", "Document")
+            self.zotero_btn.setText("Zotero ✓")
+            self.zotero_btn.setToolTip(f"Linked to Zotero: {title}\nClick to view, edit, or manage collections/notes")
+            self.add_log(f"Zotero item updated: {title}")
+
+    def save_chat_response_to_zotero(self, msg_data: dict):
+        """Saves a generated AI chat message as a rich HTML note on the linked Zotero item."""
+        if not self.zotero_manager.is_configured():
+            QMessageBox.warning(
+                self,
+                "Zotero Not Configured",
+                "Please configure your Zotero User ID and API key in Settings > Zotero first."
+            )
+            return
+
+        if not self.current_zotero_item:
+            reply = QMessageBox.question(
+                self,
+                "Not Linked to Zotero",
+                "This PDF is not yet linked to an item in your Zotero library.\n\n"
+                "Would you like to open the Zotero dialog to add or link it now?",
+                QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No
+            )
+            if reply == QMessageBox.StandardButton.Yes:
+                self.open_zotero_dialog()
+            return
+
+        markdown_text = msg_data.get("markdown", "")
+        if not markdown_text:
+            return
+
+        item_key = self.current_zotero_item.get("key") or self.current_zotero_item.get("data", {}).get("key")
+        if not item_key:
+            QMessageBox.warning(self, "Error", "Could not determine Zotero item key.")
+            return
+
+        from markdown_it import MarkdownIt
+        md = MarkdownIt("commonmark")
+        note_body = md.render(markdown_text)
+        note_html = f"<p><b>AI PDF Viewer Response:</b></p>{note_body}"
+        tags = ["AI-Generated", "AI PDF Viewer"]
+
+        try:
+            res = self.zotero_manager.add_note_to_item(item_key, note_html, tags=tags)
+            if res:
+                idx = msg_data.get("index")
+                if idx is not None:
+                    self.chat_panel.mark_zotero_saved(idx)
+                self.statusBar().showMessage("Note saved to Zotero successfully!", 4000)
+                self.add_log(f"Saved AI response as Zotero note for item {item_key}")
+            else:
+                QMessageBox.critical(self, "Error", "Failed to save note to Zotero.")
+        except Exception as e:
+            QMessageBox.critical(self, "Error", f"Failed to save note to Zotero: {e}")

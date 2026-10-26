@@ -30,6 +30,7 @@ class AIChatPanel(QWidget):
     save_requested = Signal(dict)
     index_requested = Signal()
     append_requested = Signal(dict)
+    save_to_zotero_requested = Signal(dict)
     open_settings_requested = Signal()
     retry_requested = Signal()
     
@@ -37,6 +38,7 @@ class AIChatPanel(QWidget):
         super().__init__(parent)
         self.setMinimumWidth(0)
         self.is_generating = False
+        self.zotero_saved_indices = set()
         
         self.app_style = app_style
         self.color_mode = color_mode
@@ -142,8 +144,25 @@ class AIChatPanel(QWidget):
                     self._request_edit_message(idx)
                 except ValueError:
                     pass
+            elif host == "zotero":
+                try:
+                    idx = int(path)
+                    self._request_save_zotero_note(idx)
+                except ValueError:
+                    pass
         else:
             QDesktopServices.openUrl(url)
+
+    def _request_save_zotero_note(self, idx: int):
+        if 0 <= idx < len(self.raw_messages):
+            msg_data = self.raw_messages[idx]
+            self.save_to_zotero_requested.emit(msg_data)
+
+    def mark_zotero_saved(self, idx: int):
+        if not hasattr(self, "zotero_saved_indices"):
+            self.zotero_saved_indices = set()
+        self.zotero_saved_indices.add(idx)
+        self._refresh_chat_display()
 
     def _request_append_message(self, idx: int):
         if 0 <= idx < len(self.raw_messages):
@@ -182,15 +201,21 @@ class AIChatPanel(QWidget):
 
     def _get_button_html(self, idx: int):
         is_appended = idx in self.appended_indices
+        is_zotero = idx in getattr(self, "zotero_saved_indices", set())
         
-        edit_btn = f'<a href="action://edit/{idx}" style="text-decoration:none; color:#1a73e8; font-size:12px; margin-right:15px; font-weight:bold;">[✎ Edit Response]</a>'
+        edit_btn = f'<a href="action://edit/{idx}" style="text-decoration:none; color:#1a73e8; font-size:12px; margin-right:12px; font-weight:bold;">[✎ Edit Response]</a>'
         
         if is_appended:
-            append_btn = f'<span style="color:#777; font-size:12px; font-weight:bold;">[✓ Appended]</span>'
+            append_btn = f'<span style="color:#777; font-size:12px; margin-right:12px; font-weight:bold;">[✓ Appended]</span>'
         else:
-            append_btn = f'<a href="action://append/{idx}" style="text-decoration:none; color:#1a73e8; font-size:12px; font-weight:bold;">[+ Append to PDF]</a>'
+            append_btn = f'<a href="action://append/{idx}" style="text-decoration:none; color:#1a73e8; font-size:12px; margin-right:12px; font-weight:bold;">[+ Append to PDF]</a>'
             
-        return f'<div style="margin-top:10px;">{edit_btn} {append_btn}</div>'
+        if is_zotero:
+            zotero_btn = f'<span style="color:#2e7d32; font-size:12px; font-weight:bold;">[✓ In Zotero Note]</span>'
+        else:
+            zotero_btn = f'<a href="action://zotero/{idx}" style="text-decoration:none; color:#1a73e8; font-size:12px; font-weight:bold;">[📚 Save as Zotero Note]</a>'
+
+        return f'<div style="margin-top:10px;">{edit_btn} {append_btn} {zotero_btn}</div>'
 
     def _refresh_chat_display(self):
         p = ThemeManager.get_palette(self.app_style, self.color_mode)
@@ -256,7 +281,7 @@ class AIChatPanel(QWidget):
                         bubble_content += f'<b>{title}</b><br>{render_markdown(part)}'
                         bubble_content += f'</div>'
                     
-                    bubble_content += f'<br><a href="action://append/{idx}" style="text-decoration:none; color:#1a73e8; font-size:12px; font-weight:bold;">[+ Append to PDF]</a>'
+                    bubble_content += f'<br>{self._get_button_html(idx)}'
                 
                 html_parts.append(f'''
                 <div style="display: flex; justify-content: flex-start; margin-bottom: 15px;">
@@ -524,6 +549,8 @@ class AIChatPanel(QWidget):
     def clear_chat(self):
         self.raw_messages = []
         self.appended_indices.clear()
+        if hasattr(self, "zotero_saved_indices"):
+            self.zotero_saved_indices.clear()
         self.index_btn.setVisible(False)
         self._refresh_chat_display()
 

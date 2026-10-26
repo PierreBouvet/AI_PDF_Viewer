@@ -11,3 +11,4 @@ markdown>=3.5.0
 matplotlib>=3.8.0
 cairosvg
 certifi>=2024.0.0
+pyzotero>=1.5.0

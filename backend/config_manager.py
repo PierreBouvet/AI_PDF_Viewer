@@ -117,6 +117,41 @@ class ConfigManager:
         self.settings.setValue("last_opened_dir", value)
         self.settings.sync()
 
+    @property
+    def zotero_user_id(self) -> str:
+        """Zotero User ID for API calls."""
+        return str(self.settings.value("zotero_user_id", "")).strip()
+
+    @zotero_user_id.setter
+    def zotero_user_id(self, value: str):
+        self.settings.setValue("zotero_user_id", str(value).strip())
+        self.settings.sync()
+
+    @property
+    def zotero_library_type(self) -> str:
+        """Zotero library type: 'user' (default) or 'group'."""
+        val = str(self.settings.value("zotero_library_type", "user")).strip()
+        return val if val in ("user", "group") else "user"
+
+    @zotero_library_type.setter
+    def zotero_library_type(self, value: str):
+        val = str(value).strip().lower()
+        self.settings.setValue("zotero_library_type", val if val in ("user", "group") else "user")
+        self.settings.sync()
+
+    @property
+    def zotero_auto_check(self) -> bool:
+        """Whether to automatically check if an opened PDF exists in Zotero."""
+        val = self.settings.value("zotero_auto_check", True)
+        if isinstance(val, bool):
+            return val
+        return str(val).lower() in ("true", "1")
+
+    @zotero_auto_check.setter
+    def zotero_auto_check(self, value: bool):
+        self.settings.setValue("zotero_auto_check", bool(value))
+        self.settings.sync()
+
 
 
     @property
