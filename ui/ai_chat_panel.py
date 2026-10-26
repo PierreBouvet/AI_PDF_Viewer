@@ -225,9 +225,9 @@ class AIChatPanel(QWidget):
         html_parts = []
         katex_head = """
         <head>
-            <link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/katex@0.16.9/dist/katex.min.css">
-            <script src="https://cdn.jsdelivr.net/npm/katex@0.16.9/dist/katex.min.js"></script>
-            <script src="https://cdn.jsdelivr.net/npm/katex@0.16.9/dist/contrib/auto-render.min.js"></script>
+            <link rel="stylesheet" href="katex/katex.min.css" onerror="this.onerror=null;this.href='https://cdn.jsdelivr.net/npm/katex@0.16.9/dist/katex.min.css';">
+            <script src="katex/katex.min.js" onerror="this.onerror=null;this.src='https://cdn.jsdelivr.net/npm/katex@0.16.9/dist/katex.min.js';"></script>
+            <script src="katex/contrib/auto-render.min.js" onerror="this.onerror=null;this.src='https://cdn.jsdelivr.net/npm/katex@0.16.9/dist/contrib/auto-render.min.js';"></script>
         </head>
         """
         html_parts.append(f"<!DOCTYPE html>\n<html>{katex_head}<body style=\"{font} background-color: {p['bg_card']}; margin: 5px; word-wrap: break-word;\">")
@@ -307,7 +307,9 @@ class AIChatPanel(QWidget):
                     renderMathInElement(document.body, {
                         delimiters: [
                             {left: '$$', right: '$$', display: true},
-                            {left: '$', right: '$', display: false}
+                            {left: '\\\\[', right: '\\\\]', display: true},
+                            {left: '$', right: '$', display: false},
+                            {left: '\\\\(', right: '\\\\)', display: false}
                         ],
                         throwOnError: false
                     });
@@ -320,7 +322,8 @@ class AIChatPanel(QWidget):
         </body></html>
         """)
         
-        self.web_view.setHtml("".join(html_parts))
+        from ui.asset_loader import get_assets_base_url
+        self.web_view.setHtml("".join(html_parts), get_assets_base_url())
         
         # Scroll to bottom using Javascript
         self.web_view.page().runJavaScript("window.scrollTo(0, document.body.scrollHeight);")
