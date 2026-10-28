@@ -10,6 +10,7 @@ from backend.ai_assistant import (
     fetch_academic_models,
     format_academic_messages,
     estimate_response_time_seconds,
+    _extract_academic_error_message,
     AIAssistant
 )
 
@@ -193,3 +194,114 @@ def test_academic_config_dialog(qtbot, monkeypatch):
     assert stored_passwords["academic_client_secret"] == "my_client_secret_xyz"
     assert dialog.config.ai_provider == "academic"
     assert dialog.config.academic_base_url == "https://meduniwien-api.academic-ai.at"
+
+
+def test_extract_academic_error_message():
+    # 1. Nested validation error in meta.error.message
+    nested_err = {
+        "message": "API request failed",
+        "meta": {
+            "error": {
+                "internalErrorCode": 400,
+                "message": "API Client Error: Validation failed: Field 'temperature' for model 'gpt-5.2' is only supported when reasoningEffort is 'none'"
+            }
+        }
+    }
+    extracted = _extract_academic_error_message(nested_err, "Fallback")
+    assert extracted == "Validation failed: Field 'temperature' for model 'gpt-5.2' is only supported when reasoningEffort is 'none'"
+
+    # 2. Standard top-level message
+    simple_err = {"message": "Invalid API token"}
+    assert _extract_academic_error_message(simple_err, "Fallback") == "Invalid API token"
+
+    # 3. Generic "API request failed" with no detail falls back
+    generic_err = {"message": "API request failed"}
+    assert _extract_academic_error_message(generic_err, "Fallback Reason") == "API request failed"
+
+
+def test_academic_call_api_reasoning_model_omits_temperature(monkeypatch):
+    monkeypatch.setattr(ConfigManager, "ai_provider", "academic")
+    monkeypatch.setattr(ConfigManager, "academic_model_name", "gpt-5.2")
+
+    import keyring
+    creds = {"academic_client_id": "mock_cid", "academic_client_secret": "mock_sec"}
+    monkeypatch.setattr(keyring, "get_password", lambda svc, key: creds.get(key))
+
+    captured_requests = []
+
+    def mock_urlopen(req, *args, **kwargs):
+        captured_requests.append(req)
+        resp_data = json.dumps({
+            "success": True,
+            "data": {
+                "content": "Answer from gpt-5.2",
+                "model": "gpt-5.2"
+            }
+        }).encode("utf-8")
+        mock_resp = io.BytesIO(resp_data)
+        class MockResp:
+            def __enter__(self):
+                return mock_resp
+            def __exit__(self, *args):
+                pass
+        return MockResp()
+
+    monkeypatch.setattr(urllib.request, "urlopen", mock_urlopen)
+
+    assistant = AIAssistant()
+    res = assistant._call_academic_api([{"role": "user", "content": "Hello"}])
+    assert res == "Answer from gpt-5.2"
+    assert len(captured_requests) == 1
+
+    payload = json.loads(captured_requests[0].data.decode("utf-8"))
+    assert payload["model"] == "gpt-5.2"
+    assert "temperature" not in payload  # Must not include temperature for gpt-5.2!
+
+
+def test_academic_call_api_retry_on_temperature_rejection(monkeypatch):
+    monkeypatch.setattr(ConfigManager, "ai_provider", "academic")
+    monkeypatch.setattr(ConfigManager, "academic_model_name", "custom-reasoning-model")
+
+    import keyring
+    creds = {"academic_client_id": "mock_cid", "academic_client_secret": "mock_sec"}
+    monkeypatch.setattr(keyring, "get_password", lambda svc, key: creds.get(key))
+
+    call_count = 0
+
+    def mock_urlopen(req, *args, **kwargs):
+        nonlocal call_count
+        call_count += 1
+        payload = json.loads(req.data.decode("utf-8"))
+        if "temperature" in payload:
+            err_json = {
+                "message": "API request failed",
+                "meta": {
+                    "error": {
+                        "message": "API Client Error: Field 'temperature' is not supported for this model"
+                    }
+                }
+            }
+            err_bytes = json.dumps(err_json).encode("utf-8")
+            raise urllib.error.HTTPError("http://test", 400, "Bad Request", {}, io.BytesIO(err_bytes))
+
+        # Second call succeeds
+        resp_data = json.dumps({
+            "success": True,
+            "data": {"content": "Answer after retry"}
+        }).encode("utf-8")
+        mock_resp = io.BytesIO(resp_data)
+        class MockResp:
+            def __enter__(self):
+                return mock_resp
+            def __exit__(self, *args):
+                pass
+        return MockResp()
+
+    monkeypatch.setattr(urllib.request, "urlopen", mock_urlopen)
+
+    assistant = AIAssistant()
+    # If custom model had temperature, it catches 400 and retries without temperature
+    res = assistant._call_academic_api([{"role": "user", "content": "Hello"}], model_override="standard-model")
+    assert res == "Answer after retry"
+    assert call_count == 2
+

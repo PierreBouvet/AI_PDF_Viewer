@@ -104,6 +104,38 @@ def _get_academic_ssl_context():
         return ssl._create_unverified_context()
 
 
+def _extract_academic_error_message(err_json: dict, fallback: str) -> str:
+    """Extract the most specific and informative error message from an Academic API JSON error response."""
+    if not isinstance(err_json, dict):
+        return fallback
+
+    # Check nested meta.error.message first (contains detailed validation failures)
+    meta_err = err_json.get("meta", {}).get("error", {})
+    if isinstance(meta_err, dict) and meta_err.get("message"):
+        msg = str(meta_err["message"]).strip()
+        if msg.startswith("API Client Error: "):
+            msg = msg[len("API Client Error: "):].strip()
+        if msg:
+            return msg
+
+    # Check top-level message if not generic "API request failed"
+    msg = err_json.get("message")
+    if msg and str(msg).strip() != "API request failed":
+        return str(msg).strip()
+
+    # Check detail or error object
+    if err_json.get("detail"):
+        return str(err_json["detail"]).strip()
+    if err_json.get("error"):
+        err_val = err_json["error"]
+        if isinstance(err_val, dict) and err_val.get("message"):
+            return str(err_val["message"]).strip()
+        return str(err_val).strip()
+
+    # Fallback to top-level message or reason
+    return str(err_json.get("message") or fallback)
+
+
 def fetch_academic_models(base_url: str, client_id: str, client_secret: str) -> list[str]:
     """
     Fetch authorized models from the academic API endpoint (e.g. /api/v1/llm/models).
@@ -146,10 +178,7 @@ def fetch_academic_models(base_url: str, client_id: str, client_secret: str) -> 
         err_msg = e.reason
         try:
             err_json = json.loads(e.read().decode("utf-8"))
-            if "message" in err_json:
-                err_msg = err_json["message"]
-            elif "meta" in err_json and "error" in err_json["meta"]:
-                err_msg = err_json["meta"]["error"].get("message", err_msg)
+            err_msg = _extract_academic_error_message(err_json, e.reason)
         except Exception:
             pass
         raise ValueError(f"Academic API Error ({e.code}): {err_msg}")
@@ -851,9 +880,18 @@ class AIAssistant:
         payload = {
             "model": target_model,
             "messages": formatted_messages,
-            "temperature": 0.3,
             "maxTokens": 4096,
         }
+
+        # Reasoning / thinking models (e.g., gpt-5.x, o1, o3, o4, or models with 'reasoning')
+        # strictly reject the 'temperature' parameter on the Academic API unless reasoningEffort is 'none'.
+        # Only set temperature for standard non-reasoning models to prevent HTTP 400 Bad Request.
+        is_reasoning_model = any(
+            pattern in target_model.lower()
+            for pattern in ["gpt-5", "o1", "o3", "o4", "reasoning"]
+        )
+        if not is_reasoning_model:
+            payload["temperature"] = 0.3
 
         headers = {
             "X-Client-ID": cid,
@@ -887,12 +925,27 @@ class AIAssistant:
             err_msg = e.reason
             try:
                 err_json = json.loads(e.read().decode("utf-8"))
-                if "message" in err_json:
-                    err_msg = err_json["message"]
-                elif "meta" in err_json and "error" in err_json["meta"]:
-                    err_msg = err_json["meta"]["error"].get("message", err_msg)
+                err_msg = _extract_academic_error_message(err_json, e.reason)
             except Exception:
                 pass
+
+            # If temperature was sent and rejected by the server for this model, auto-retry once without temperature
+            if e.code == 400 and "temperature" in payload and "temperature" in err_msg.lower():
+                logger.info(f"Retrying Academic AI request for model '{target_model}' without temperature...")
+                del payload["temperature"]
+                req_data_retry = json.dumps(payload).encode("utf-8")
+                req_retry = urllib.request.Request(url, data=req_data_retry, headers=headers, method="POST")
+                try:
+                    resp_handle = urllib.request.urlopen(req_retry, timeout=timeout_sec, context=ctx)
+                    with resp_handle as resp:
+                        result = json.loads(resp.read().decode("utf-8"))
+                        content = result.get("data", {}).get("content", "").strip()
+                        if stream_callback and content:
+                            stream_callback(content)
+                        return content
+                except Exception as retry_err:
+                    logger.error(f"Academic AI retry without temperature failed: {retry_err}")
+
             raise ValueError(f"Academic AI Error ({e.code}): {err_msg}")
         except urllib.error.URLError as e:
             raise ValueError(f"Could not connect to Academic AI server at {url}: {e.reason}")
@@ -1127,9 +1180,12 @@ class AIAssistant:
         suffix = (
             "\n\"\"\"\n\nReturn a JSON object with the following fields:\n"
             "{\n"
+            "  \"itemType\": \"journalArticle, preprint, book, conferencePaper, report, or thesis\",\n"
             "  \"title\": \"Title of paper\",\n"
             "  \"creators\": [{\"firstName\": \"...\", \"lastName\": \"...\"}],\n"
-            "  \"publicationTitle\": \"Journal or Conference name\",\n"
+            "  \"publicationTitle\": \"Journal name if journal article\",\n"
+            "  \"repository\": \"Repository name if preprint (e.g. arXiv, bioRxiv, medRxiv)\",\n"
+            "  \"archiveID\": \"Archive ID if preprint (e.g. arXiv:2401.12345)\",\n"
             "  \"date\": \"Year (YYYY)\",\n"
             "  \"DOI\": \"10.xxxx/...\",\n"
             "  \"abstractNote\": \"Short abstract if present\"\n"

@@ -320,16 +320,10 @@ class ZoteroManager:
         else:
             template["title"] = os.path.basename(pdf_path)
 
-        if "abstractNote" in metadata:
-            template["abstractNote"] = metadata["abstractNote"]
-        if "publicationTitle" in metadata:
-            template["publicationTitle"] = metadata["publicationTitle"]
-        if "date" in metadata:
-            template["date"] = metadata["date"]
-        if "DOI" in metadata:
-            template["DOI"] = metadata["DOI"]
-        if "url" in metadata:
-            template["url"] = metadata["url"]
+        for k, v in metadata.items():
+            if k in template and k not in ("title", "creators", "collections", "tags") and v:
+                template[k] = v
+
 
         # Creators (authors)
         if "creators" in metadata and isinstance(metadata["creators"], list):
@@ -408,7 +402,7 @@ class ZoteroManager:
 
         if metadata:
             for k, v in metadata.items():
-                if k in item["data"] and v:
+                if k not in ("collections", "tags") and v:
                     item["data"][k] = v
 
         client.update_item(item)
@@ -482,16 +476,23 @@ def _parse_crossref_message(msg: Dict[str, Any], fallback_doi: str = "") -> Dict
 
     abstract = _clean_abstract(msg.get("abstract", ""))
 
-    return {
+    res = {
         "itemType": item_type,
         "title": title.strip(),
         "creators": creators,
-        "publicationTitle": publication.strip(),
         "date": year_str,
         "DOI": doi.strip(),
         "abstractNote": abstract,
         "source": "Crossref",
     }
+    if item_type == "preprint":
+        res["repository"] = publication.strip()
+        res["genre"] = "Preprint"
+        res["publicationTitle"] = publication.strip()
+    else:
+        res["publicationTitle"] = publication.strip()
+
+    return res
 
 
 def _parse_arxiv_entry(entry, ns: Dict[str, str], fallback_id: str = "") -> Dict[str, Any]:
@@ -527,22 +528,32 @@ def _parse_arxiv_entry(entry, ns: Dict[str, str], fallback_id: str = "") -> Dict
 
     id_node = entry.find("atom:id", ns)
     doi = ""
+    arx_id = ""
     if id_node is not None and id_node.text and "arxiv.org/abs/" in id_node.text:
         arx_id = id_node.text.split("arxiv.org/abs/")[-1].strip()
         doi = f"10.48550/arXiv.{arx_id}"
     elif fallback_id:
+        arx_id = fallback_id
         doi = f"10.48550/arXiv.{fallback_id}"
+
+    archive_id_str = f"arXiv:{arx_id}" if arx_id else ""
+    url_str = f"https://arxiv.org/abs/{arx_id}" if arx_id else ""
 
     return {
         "itemType": "preprint",
         "title": title,
         "creators": creators,
+        "repository": "arXiv",
+        "archiveID": archive_id_str,
+        "genre": "Preprint",
         "publicationTitle": "arXiv",
         "date": date_str,
         "DOI": doi,
+        "url": url_str,
         "abstractNote": abstract,
         "source": "arXiv",
     }
+
 
 
 def lookup_scientific_article(

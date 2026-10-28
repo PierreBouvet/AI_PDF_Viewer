@@ -1162,6 +1162,9 @@ class MainWindow(QMainWindow):
                 self.statusBar().showMessage(f"Page {page_index + 1} deleted.", 3000)
 
     def index_current_document(self):
+        if not self.pdf_doc or not self.pdf_doc.doc or not getattr(self.pdf_doc, "file_path", None):
+            return
+
         if self.ai_assistant.provider == "cloud":
             api_key = keyring.get_password("AIPDFViewer", "api_key")
             if not api_key:
@@ -1227,6 +1230,7 @@ class MainWindow(QMainWindow):
         self.chat_panel.set_document_tokens(doc_tokens)
         self.chat_panel.set_index_status("indexed", model)
         self.add_log(f"Document indexed successfully by {model}" if model else "Document indexed successfully")
+        self.chat_panel.add_system_message(f"✓ Document indexed successfully with {model}." if model else "✓ Document indexed successfully.")
         
     def on_indexing_error(self, error_msg: str):
         if self.indexer:
@@ -1235,7 +1239,7 @@ class MainWindow(QMainWindow):
         self.ai_assistant.clear_index()
         self.chat_panel.set_index_status("unloaded")
         self.chat_panel.show_index_button()
-        self.chat_panel.add_system_message(f"Indexing failed: {error_msg}")
+        self.chat_panel.add_system_error(f"Indexing failed: {error_msg}", allow_retry=False)
 
         # Check if document exceeded size limit (CRIT-03)
         from backend.ai_assistant import LARGE_DOCUMENT_ERROR_MESSAGE

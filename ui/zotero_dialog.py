@@ -136,6 +136,47 @@ class ScientificDBSearchWorker(QThread):
             self.finished_signal.emit(False, str(e), None)
 
 
+ITEM_TYPE_FIELDS: Dict[str, List[str]] = {
+    "journalArticle": [
+        "title", "creators", "publicationTitle", "volume", "issue", "pages",
+        "date", "series", "seriesTitle", "seriesText", "journalAbbreviation",
+        "DOI", "ISSN", "url", "language", "abstractNote"
+    ],
+    "preprint": [
+        "title", "creators", "repository", "archiveID", "genre",
+        "date", "series", "seriesNumber", "DOI", "url", "abstractNote"
+    ],
+    "book": [
+        "title", "creators", "publisher", "place", "date", "edition",
+        "volume", "numberOfVolumes", "series", "seriesNumber", "numPages",
+        "ISBN", "DOI", "url", "language", "abstractNote"
+    ],
+    "bookSection": [
+        "title", "creators", "bookTitle", "publisher", "place", "date",
+        "edition", "volume", "numberOfVolumes", "series", "seriesNumber",
+        "pages", "ISBN", "DOI", "url", "language", "abstractNote"
+    ],
+    "conferencePaper": [
+        "title", "creators", "proceedingsTitle", "conferenceName", "place",
+        "publisher", "date", "volume", "pages", "series", "DOI", "ISBN",
+        "url", "language", "abstractNote"
+    ],
+    "report": [
+        "title", "creators", "institution", "reportNumber", "reportType",
+        "place", "date", "pages", "series", "DOI", "url", "language",
+        "abstractNote"
+    ],
+    "thesis": [
+        "title", "creators", "university", "thesisType", "place", "date",
+        "numPages", "DOI", "url", "language", "abstractNote"
+    ],
+    "webpage": [
+        "title", "creators", "websiteTitle", "websiteType", "publisher",
+        "date", "accessDate", "url", "language", "abstractNote"
+    ],
+}
+
+
 class ZoteroDialog(QDialog):
     """
     Dialog for inspecting and managing the Zotero status of a PDF:
@@ -340,38 +381,166 @@ class ZoteroDialog(QDialog):
         ai_row.addWidget(self.ai_meta_btn)
         layout.addLayout(ai_row)
 
-        form = QFormLayout()
-        form.setSpacing(10)
-        form.setFieldGrowthPolicy(QFormLayout.FieldGrowthPolicy.AllNonFixedFieldsGrow)
-        form.setLabelAlignment(Qt.AlignmentFlag.AlignRight)
+        # Scroll area wrapping all bibliographic form fields
+        self.meta_scroll = QScrollArea()
+        self.meta_scroll.setWidgetResizable(True)
+        self.meta_scroll.setFrameShape(QFrame.Shape.NoFrame)
+        self.meta_scroll.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
+        self.meta_scroll.setVerticalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAsNeeded)
 
+        scroll_content = QWidget()
+        self.meta_form = QFormLayout(scroll_content)
+        self.meta_form.setContentsMargins(0, 4, 8, 4)
+        self.meta_form.setSpacing(10)
+        self.meta_form.setFieldGrowthPolicy(QFormLayout.FieldGrowthPolicy.AllNonFixedFieldsGrow)
+        self.meta_form.setLabelAlignment(Qt.AlignmentFlag.AlignRight)
+
+        # 1. Document / Item Type Selector
         self.input_type = QComboBox()
-        self.input_type.addItems(["journalArticle", "book", "conferencePaper", "report", "preprint", "thesis"])
+        self.input_type.addItems([
+            "journalArticle", "preprint", "book", "bookSection",
+            "conferencePaper", "report", "thesis", "webpage"
+        ])
         self.input_type.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Fixed)
-        form.addRow("Item Type:", self.input_type)
+        self.meta_form.addRow("Item Type:", self.input_type)
 
+        # 2. General common fields
         self.input_title = QLineEdit()
-        self.input_title.setPlaceholderText("Paper or article title")
+        self.input_title.setPlaceholderText("Paper or document title")
         self.input_title.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Fixed)
-        form.addRow("Title:", self.input_title)
 
         self.input_authors = QLineEdit()
         self.input_authors.setPlaceholderText("Authors (e.g. Bouvet, Pierre; Doe, Jane)")
         self.input_authors.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Fixed)
-        form.addRow("Authors:", self.input_authors)
 
+        # 3. Preprint specific fields
+        self.input_repository = QLineEdit()
+        self.input_repository.setPlaceholderText("Repository / Archive (e.g. arXiv, bioRxiv, ChemRxiv)")
+        self.input_repository.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Fixed)
+
+        self.input_archive_id = QLineEdit()
+        self.input_archive_id.setPlaceholderText("Archive ID (e.g. arXiv:2401.12345)")
+        self.input_archive_id.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Fixed)
+
+        self.input_genre = QLineEdit()
+        self.input_genre.setPlaceholderText("Genre / Type (e.g. Preprint, Working Paper)")
+        self.input_genre.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Fixed)
+
+        # 4. Journal Article specific fields
         self.input_publication = QLineEdit()
-        self.input_publication.setPlaceholderText("Journal, Conference, or Publisher")
+        self.input_publication.setPlaceholderText("Journal or publication name")
         self.input_publication.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Fixed)
-        form.addRow("Publication:", self.input_publication)
 
+        self.input_journal_abbr = QLineEdit()
+        self.input_journal_abbr.setPlaceholderText("Journal abbreviation (e.g. Nat. Mach. Intell.)")
+        self.input_journal_abbr.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Fixed)
+
+        self.input_volume = QLineEdit()
+        self.input_volume.setPlaceholderText("Volume (e.g. 42)")
+        self.input_volume.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Fixed)
+
+        self.input_issue = QLineEdit()
+        self.input_issue.setPlaceholderText("Issue (e.g. 3)")
+        self.input_issue.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Fixed)
+
+        self.input_pages = QLineEdit()
+        self.input_pages.setPlaceholderText("Pages (e.g. 100-125)")
+        self.input_pages.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Fixed)
+
+        # 5. Book / Book Section specific fields
+        self.input_book_title = QLineEdit()
+        self.input_book_title.setPlaceholderText("Book title containing this section")
+        self.input_book_title.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Fixed)
+
+        self.input_edition = QLineEdit()
+        self.input_edition.setPlaceholderText("Edition (e.g. 2nd ed.)")
+        self.input_edition.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Fixed)
+
+        self.input_numberOfVolumes = QLineEdit()
+        self.input_numberOfVolumes.setPlaceholderText("Number of volumes (e.g. 3)")
+        self.input_numberOfVolumes.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Fixed)
+
+        self.input_numPages = QLineEdit()
+        self.input_numPages.setPlaceholderText("Number of pages (e.g. 450)")
+        self.input_numPages.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Fixed)
+
+        # 6. Conference Paper specific fields
+        self.input_proceedings_title = QLineEdit()
+        self.input_proceedings_title.setPlaceholderText("Proceedings title")
+        self.input_proceedings_title.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Fixed)
+
+        self.input_conference_name = QLineEdit()
+        self.input_conference_name.setPlaceholderText("Conference name (e.g. NeurIPS 2024)")
+        self.input_conference_name.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Fixed)
+
+        # 7. Report specific fields
+        self.input_institution = QLineEdit()
+        self.input_institution.setPlaceholderText("Issuing institution (e.g. CERN, MIT)")
+        self.input_institution.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Fixed)
+
+        self.input_report_number = QLineEdit()
+        self.input_report_number.setPlaceholderText("Report number (e.g. TR-2024-05)")
+        self.input_report_number.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Fixed)
+
+        self.input_report_type = QLineEdit()
+        self.input_report_type.setPlaceholderText("Report type (e.g. Technical Report, White Paper)")
+        self.input_report_type.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Fixed)
+
+        # 8. Thesis specific fields
+        self.input_university = QLineEdit()
+        self.input_university.setPlaceholderText("Awarding university (e.g. Stanford University)")
+        self.input_university.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Fixed)
+
+        self.input_thesis_type = QLineEdit()
+        self.input_thesis_type.setPlaceholderText("Thesis type (e.g. Ph.D. Thesis, Master's Thesis)")
+        self.input_thesis_type.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Fixed)
+
+        # 9. Webpage specific fields
+        self.input_website_title = QLineEdit()
+        self.input_website_title.setPlaceholderText("Website title")
+        self.input_website_title.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Fixed)
+
+        self.input_website_type = QLineEdit()
+        self.input_website_type.setPlaceholderText("Website type (e.g. Blog Post)")
+        self.input_website_type.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Fixed)
+
+        self.input_access_date = QLineEdit()
+        self.input_access_date.setPlaceholderText("Date accessed (e.g. 2026-10-26)")
+        self.input_access_date.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Fixed)
+
+        # 10. Publishing & Location
+        self.input_publisher = QLineEdit()
+        self.input_publisher.setPlaceholderText("Publisher name")
+        self.input_publisher.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Fixed)
+
+        self.input_place = QLineEdit()
+        self.input_place.setPlaceholderText("Place (e.g. New York, NY)")
+        self.input_place.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Fixed)
+
+        # 11. Series
+        self.input_series = QLineEdit()
+        self.input_series.setPlaceholderText("Series name")
+        self.input_series.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Fixed)
+
+        self.input_series_number = QLineEdit()
+        self.input_series_number.setPlaceholderText("Series number")
+        self.input_series_number.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Fixed)
+
+        self.input_series_title = QLineEdit()
+        self.input_series_title.setPlaceholderText("Series title")
+        self.input_series_title.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Fixed)
+
+        self.input_series_text = QLineEdit()
+        self.input_series_text.setPlaceholderText("Series text")
+        self.input_series_text.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Fixed)
+
+        # 12. Date & Identifiers
         self.input_date = QLineEdit()
         self.input_date.setPlaceholderText("Year or Date (e.g. 2026)")
         self.input_date.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Fixed)
-        form.addRow("Date / Year:", self.input_date)
 
-        doi_container = QWidget()
-        doi_layout = QHBoxLayout(doi_container)
+        self.doi_container = QWidget()
+        doi_layout = QHBoxLayout(self.doi_container)
         doi_layout.setContentsMargins(0, 0, 0, 0)
         doi_layout.setSpacing(6)
 
@@ -398,17 +567,81 @@ class ZoteroDialog(QDialog):
         """)
         self.btn_doi_search.clicked.connect(self._search_scientific_database)
         doi_layout.addWidget(self.btn_doi_search)
-        doi_container.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Fixed)
-        form.addRow("DOI:", doi_container)
+        self.doi_container.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Fixed)
+
+        self.input_issn = QLineEdit()
+        self.input_issn.setPlaceholderText("ISSN (e.g. 1234-5678)")
+        self.input_issn.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Fixed)
+
+        self.input_isbn = QLineEdit()
+        self.input_isbn.setPlaceholderText("ISBN (e.g. 978-3-16-148410-0)")
+        self.input_isbn.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Fixed)
+
+        self.input_url = QLineEdit()
+        self.input_url.setPlaceholderText("URL (e.g. https://arxiv.org/abs/...)")
+        self.input_url.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Fixed)
+
+        self.input_language = QLineEdit()
+        self.input_language.setPlaceholderText("Language (e.g. en, fr)")
+        self.input_language.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Fixed)
 
         self.input_abstract = QTextEdit()
         self.input_abstract.setPlaceholderText("Abstract or summary...")
         self.input_abstract.setMinimumHeight(85)
-        self.input_abstract.setMaximumHeight(120)
+        self.input_abstract.setMaximumHeight(140)
         self.input_abstract.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Preferred)
-        form.addRow("Abstract:", self.input_abstract)
 
-        layout.addLayout(form)
+        rows = [
+            ("title", "Title:", self.input_title),
+            ("creators", "Authors:", self.input_authors),
+            ("repository", "Repository / Archive:", self.input_repository),
+            ("archiveID", "Archive ID:", self.input_archive_id),
+            ("genre", "Genre / Type:", self.input_genre),
+            ("publicationTitle", "Publication:", self.input_publication),
+            ("journalAbbreviation", "Journal Abbr:", self.input_journal_abbr),
+            ("bookTitle", "Book Title:", self.input_book_title),
+            ("proceedingsTitle", "Proceedings Title:", self.input_proceedings_title),
+            ("conferenceName", "Conference Name:", self.input_conference_name),
+            ("institution", "Institution:", self.input_institution),
+            ("reportNumber", "Report Number:", self.input_report_number),
+            ("reportType", "Report Type:", self.input_report_type),
+            ("university", "University:", self.input_university),
+            ("thesisType", "Thesis Type:", self.input_thesis_type),
+            ("websiteTitle", "Website Title:", self.input_website_title),
+            ("websiteType", "Website Type:", self.input_website_type),
+            ("publisher", "Publisher:", self.input_publisher),
+            ("place", "Place:", self.input_place),
+            ("edition", "Edition:", self.input_edition),
+            ("volume", "Volume:", self.input_volume),
+            ("issue", "Issue:", self.input_issue),
+            ("pages", "Pages:", self.input_pages),
+            ("numberOfVolumes", "# of Volumes:", self.input_numberOfVolumes),
+            ("numPages", "# of Pages:", self.input_numPages),
+            ("series", "Series:", self.input_series),
+            ("seriesNumber", "Series Number:", self.input_series_number),
+            ("seriesTitle", "Series Title:", self.input_series_title),
+            ("seriesText", "Series Text:", self.input_series_text),
+            ("date", "Date / Year:", self.input_date),
+            ("DOI", "DOI:", self.doi_container),
+            ("ISSN", "ISSN:", self.input_issn),
+            ("ISBN", "ISBN:", self.input_isbn),
+            ("url", "URL:", self.input_url),
+            ("accessDate", "Accessed:", self.input_access_date),
+            ("language", "Language:", self.input_language),
+            ("abstractNote", "Abstract:", self.input_abstract),
+        ]
+
+        self._field_widgets = {}
+        for key, label, w in rows:
+            self.meta_form.addRow(label, w)
+            self._field_widgets[key] = w
+
+        self.meta_scroll.setWidget(scroll_content)
+        layout.addWidget(self.meta_scroll, 1)
+
+        # Dynamic field visibility handling
+        self.input_type.currentTextChanged.connect(self._on_item_type_changed)
+        self._on_item_type_changed(self.input_type.currentText())
 
         # Database search row at bottom of metadata pane
         db_box = QFrame()
@@ -460,8 +693,168 @@ class ZoteroDialog(QDialog):
         db_layout.addWidget(self.btn_db_search)
 
         layout.addWidget(db_box)
-        layout.addStretch()
         return widget
+
+    def _on_item_type_changed(self, item_type: str):
+        """Dynamically adjusts visible metadata fields based on selected item type."""
+        allowed = set(ITEM_TYPE_FIELDS.get(item_type, [
+            "title", "creators", "publicationTitle", "publisher", "date", "DOI", "url", "abstractNote"
+        ]))
+
+        # Intelligent value migration between common semantic aliases
+        if item_type == "preprint":
+            if not self.input_repository.text().strip() and self.input_publication.text().strip():
+                self.input_repository.setText(self.input_publication.text().strip())
+            if not self.input_genre.text().strip():
+                self.input_genre.setText("Preprint")
+        elif item_type == "journalArticle":
+            if not self.input_publication.text().strip() and self.input_repository.text().strip():
+                self.input_publication.setText(self.input_repository.text().strip())
+        elif item_type in ("book", "bookSection", "conferencePaper"):
+            if not self.input_publisher.text().strip() and self.input_publication.text().strip():
+                self.input_publisher.setText(self.input_publication.text().strip())
+
+        for field_key, widget in self._field_widgets.items():
+            is_visible = field_key in allowed
+            self.meta_form.setRowVisible(widget, is_visible)
+
+    def _populate_metadata_fields(self, data: Dict[str, Any]):
+        """Populates all bibliographic input fields from a dictionary (Zotero, Crossref, arXiv, AI)."""
+        if not data:
+            return
+
+        # 1. Update item type if present (triggers _on_item_type_changed)
+        item_type = data.get("itemType")
+        if item_type:
+            idx = self.input_type.findText(item_type)
+            if idx >= 0:
+                self.input_type.setCurrentIndex(idx)
+
+        # 2. Update title
+        title = data.get("title", "")
+        if title:
+            self.input_title.setText(str(title))
+
+        # 3. Update creators / authors
+        creators = data.get("creators", [])
+        if creators:
+            strs = []
+            for c in creators:
+                if isinstance(c, dict):
+                    if c.get("lastName") and c.get("firstName"):
+                        strs.append(f"{c['lastName']}, {c['firstName']}")
+                    elif c.get("name"):
+                        strs.append(c["name"])
+                    elif c.get("lastName"):
+                        strs.append(c["lastName"])
+                elif isinstance(c, str):
+                    strs.append(c)
+            if strs:
+                self.input_authors.setText("; ".join(strs))
+        elif data.get("authors"):
+            authors = data["authors"]
+            if isinstance(authors, list):
+                self.input_authors.setText("; ".join([str(a) for a in authors]))
+            elif isinstance(authors, str):
+                self.input_authors.setText(authors)
+
+        # 4. Map dictionary fields to input widgets
+        def set_val(widget, val):
+            if val is not None and str(val).strip():
+                if isinstance(widget, QTextEdit):
+                    widget.setPlainText(str(val))
+                elif isinstance(widget, QLineEdit):
+                    widget.setText(str(val))
+
+        set_val(self.input_publication, data.get("publicationTitle"))
+        set_val(self.input_repository, data.get("repository"))
+        set_val(self.input_archive_id, data.get("archiveID"))
+        set_val(self.input_genre, data.get("genre"))
+        set_val(self.input_journal_abbr, data.get("journalAbbreviation"))
+        set_val(self.input_volume, data.get("volume"))
+        set_val(self.input_issue, data.get("issue"))
+        set_val(self.input_pages, data.get("pages"))
+        set_val(self.input_book_title, data.get("bookTitle"))
+        set_val(self.input_proceedings_title, data.get("proceedingsTitle"))
+        set_val(self.input_conference_name, data.get("conferenceName"))
+        set_val(self.input_institution, data.get("institution"))
+        set_val(self.input_report_number, data.get("reportNumber"))
+        set_val(self.input_report_type, data.get("reportType"))
+        set_val(self.input_university, data.get("university"))
+        set_val(self.input_thesis_type, data.get("thesisType"))
+        set_val(self.input_website_title, data.get("websiteTitle"))
+        set_val(self.input_website_type, data.get("websiteType"))
+        set_val(self.input_access_date, data.get("accessDate"))
+        set_val(self.input_publisher, data.get("publisher"))
+        set_val(self.input_place, data.get("place"))
+        set_val(self.input_edition, data.get("edition"))
+        set_val(self.input_numberOfVolumes, data.get("numberOfVolumes"))
+        set_val(self.input_numPages, data.get("numPages"))
+        set_val(self.input_series, data.get("series"))
+        set_val(self.input_series_number, data.get("seriesNumber"))
+        set_val(self.input_series_title, data.get("seriesTitle"))
+        set_val(self.input_series_text, data.get("seriesText"))
+        set_val(self.input_date, data.get("date"))
+        set_val(self.input_doi, data.get("DOI"))
+        set_val(self.input_issn, data.get("ISSN"))
+        set_val(self.input_isbn, data.get("ISBN"))
+        set_val(self.input_url, data.get("url"))
+        set_val(self.input_language, data.get("language"))
+        set_val(self.input_abstract, data.get("abstractNote"))
+
+    def _get_metadata_dict(self) -> Dict[str, Any]:
+        """Constructs a clean metadata dictionary containing all populated fields matching the selected document type."""
+        item_type = self.input_type.currentText().strip()
+        metadata: Dict[str, Any] = {
+            "itemType": item_type,
+            "title": self.input_title.text().strip(),
+            "creators": self._parse_authors(self.input_authors.text()),
+            "abstractNote": self.input_abstract.toPlainText().strip(),
+        }
+
+        field_map = {
+            "publicationTitle": self.input_publication.text().strip(),
+            "repository": self.input_repository.text().strip(),
+            "archiveID": self.input_archive_id.text().strip(),
+            "genre": self.input_genre.text().strip(),
+            "journalAbbreviation": self.input_journal_abbr.text().strip(),
+            "volume": self.input_volume.text().strip(),
+            "issue": self.input_issue.text().strip(),
+            "pages": self.input_pages.text().strip(),
+            "bookTitle": self.input_book_title.text().strip(),
+            "proceedingsTitle": self.input_proceedings_title.text().strip(),
+            "conferenceName": self.input_conference_name.text().strip(),
+            "institution": self.input_institution.text().strip(),
+            "reportNumber": self.input_report_number.text().strip(),
+            "reportType": self.input_report_type.text().strip(),
+            "university": self.input_university.text().strip(),
+            "thesisType": self.input_thesis_type.text().strip(),
+            "websiteTitle": self.input_website_title.text().strip(),
+            "websiteType": self.input_website_type.text().strip(),
+            "accessDate": self.input_access_date.text().strip(),
+            "publisher": self.input_publisher.text().strip(),
+            "place": self.input_place.text().strip(),
+            "edition": self.input_edition.text().strip(),
+            "numberOfVolumes": self.input_numberOfVolumes.text().strip(),
+            "numPages": self.input_numPages.text().strip(),
+            "series": self.input_series.text().strip(),
+            "seriesNumber": self.input_series_number.text().strip(),
+            "seriesTitle": self.input_series_title.text().strip(),
+            "seriesText": self.input_series_text.text().strip(),
+            "date": self.input_date.text().strip(),
+            "DOI": self.input_doi.text().strip(),
+            "ISSN": self.input_issn.text().strip(),
+            "ISBN": self.input_isbn.text().strip(),
+            "url": self.input_url.text().strip(),
+            "language": self.input_language.text().strip(),
+        }
+
+        allowed_fields = ITEM_TYPE_FIELDS.get(item_type, list(field_map.keys()))
+        for k in allowed_fields:
+            if k in field_map:
+                metadata[k] = field_map[k]
+
+        return metadata
 
     def _create_collections_tab(self) -> QWidget:
         widget = QWidget()
@@ -725,27 +1118,7 @@ class ZoteroDialog(QDialog):
                 title=title,
                 item_key=item_key
             )
-            item_type = data.get("itemType", "")
-            if item_type:
-                idx = self.input_type.findText(item_type)
-                if idx >= 0:
-                    self.input_type.setCurrentIndex(idx)
-
-            self.input_title.setText(data.get("title", ""))
-            self.input_publication.setText(data.get("publicationTitle", ""))
-            self.input_date.setText(str(data.get("date", "")))
-            self.input_doi.setText(data.get("DOI", ""))
-            self.input_abstract.setPlainText(data.get("abstractNote", ""))
-
-            # Creators
-            creators = data.get("creators", [])
-            creator_strs = []
-            for c in creators:
-                if c.get("lastName") and c.get("firstName"):
-                    creator_strs.append(f"{c['lastName']}, {c['firstName']}")
-                elif c.get("name"):
-                    creator_strs.append(c["name"])
-            self.input_authors.setText("; ".join(creator_strs))
+            self._populate_metadata_fields(data)
 
             # Tags
             self.tags = [t["tag"] for t in data.get("tags", []) if isinstance(t, dict) and "tag" in t]
@@ -1219,29 +1592,7 @@ class ZoteroDialog(QDialog):
             self.status_feedback.setText(f"AI extraction failed: {err_msg}")
             return
 
-        if metadata.get("title"):
-            self.input_title.setText(metadata["title"])
-        if metadata.get("publicationTitle"):
-            self.input_publication.setText(metadata["publicationTitle"])
-        if metadata.get("date"):
-            self.input_date.setText(str(metadata["date"]))
-        if metadata.get("DOI"):
-            self.input_doi.setText(metadata["DOI"])
-        if metadata.get("abstractNote"):
-            self.input_abstract.setPlainText(metadata["abstractNote"])
-
-        creators = metadata.get("creators", [])
-        if creators:
-            strs = []
-            for c in creators:
-                if isinstance(c, dict):
-                    if c.get("lastName") and c.get("firstName"):
-                        strs.append(f"{c['lastName']}, {c['firstName']}")
-                    elif c.get("name"):
-                        strs.append(c["name"])
-            if strs:
-                self.input_authors.setText("; ".join(strs))
-
+        self._populate_metadata_fields(metadata)
         self.status_feedback.setText("✓ Metadata extracted from first page.")
 
     def _search_scientific_database(self):
@@ -1287,34 +1638,7 @@ class ZoteroDialog(QDialog):
 
         source = metadata.get("source", "Scientific Database")
         title = metadata.get("title", "")
-        if title:
-            self.input_title.setText(title)
-        if metadata.get("publicationTitle"):
-            self.input_publication.setText(metadata["publicationTitle"])
-        if metadata.get("date"):
-            self.input_date.setText(str(metadata["date"]))
-        if metadata.get("DOI"):
-            self.input_doi.setText(metadata["DOI"])
-        if metadata.get("abstractNote"):
-            self.input_abstract.setPlainText(metadata["abstractNote"])
-        if metadata.get("itemType"):
-            idx = self.input_type.findText(metadata["itemType"])
-            if idx >= 0:
-                self.input_type.setCurrentIndex(idx)
-
-        creators = metadata.get("creators", [])
-        if creators:
-            strs = []
-            for c in creators:
-                if isinstance(c, dict):
-                    if c.get("lastName") and c.get("firstName"):
-                        strs.append(f"{c['lastName']}, {c['firstName']}")
-                    elif c.get("name"):
-                        strs.append(c["name"])
-                    elif c.get("lastName"):
-                        strs.append(c["lastName"])
-            if strs:
-                self.input_authors.setText("; ".join(strs))
+        self._populate_metadata_fields(metadata)
 
         display_title = f"{title[:40]}..." if len(title) > 40 else title
         self.status_feedback.setText(f"✓ Found via {source}: {display_title}")
@@ -1379,15 +1703,7 @@ class ZoteroDialog(QDialog):
         # Synchronize selected tags
         self.tags = [name for name, info in self._keyword_data.items() if info.get("selected")]
 
-        metadata = {
-            "itemType": self.input_type.currentText(),
-            "title": title,
-            "publicationTitle": self.input_publication.text().strip(),
-            "date": self.input_date.text().strip(),
-            "DOI": self.input_doi.text().strip(),
-            "abstractNote": self.input_abstract.toPlainText().strip(),
-            "creators": self._parse_authors(self.input_authors.text()),
-        }
+        metadata = self._get_metadata_dict()
 
         collection_keys = self._get_selected_collection_keys()
         new_note = self.input_new_note.toPlainText().strip()

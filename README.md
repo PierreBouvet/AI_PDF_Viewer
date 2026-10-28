@@ -20,8 +20,8 @@ Finally, note that **this application is made to help you read documents faster 
 
 ## New in v1.2-beta
 
-- **Zotero integration**: Articles are automatically added to the Zotero account of the user via the Zotero API. The application currently only supports standalone Zotero accounts.
-- **Local file storage**: Articles can automatically be renamed and moved to a specified folder in the user's system.
+- **Zotero integration**: Articles can be referenced via crossref and then automatically added to the Zotero account of the user via the Zotero API. The application currently only supports standalone Zotero accounts.
+- **Local file storage**: Articles can automatically be renamed and moved to a specified 'sources' folder in the user's system. The paths to these local copies of the articles are stored in a database located in the 'sources' directory
 
 ## New in v1.1-beta
 

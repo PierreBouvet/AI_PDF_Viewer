@@ -428,7 +428,8 @@ def test_zotero_dialog_save_keywords_preserves_item_and_reopening(qapp, isolated
     dialog.item_updated.connect(lambda item: emitted_items.append(item))
 
     # Simulate save worker finished
-    dialog._on_save_finished(True, "", updated_item)
+    with patch("PySide6.QtWidgets.QMessageBox.information"):
+        dialog._on_save_finished(True, "", updated_item)
 
     # Step 3: Verify emitted item is valid and NOT empty
     assert len(emitted_items) == 1
@@ -492,5 +493,155 @@ def test_main_window_open_zotero_dialog_when_already_linked(qapp, isolated_test_
         call_kwargs = mock_dialog_cls.call_args[1]
         assert call_kwargs["zotero_item"] == main_win.current_zotero_item
         assert call_kwargs["first_page_text"] == "Sample text from page"
+
+
+def test_zotero_dialog_dynamic_metadata_fields_per_document_type(qapp, isolated_test_settings, tmp_path):
+    """
+    Verifies that selecting different document types (preprint, journalArticle, book, etc.)
+    dynamically shows and hides the appropriate schema fields, wraps fields in a QScrollArea,
+    and constructs the expected metadata dictionary.
+    """
+    pdf_file = tmp_path / "paper.pdf"
+    pdf_file.write_text("%PDF-1.4 sample")
+
+    mock_mgr = MagicMock(spec=ZoteroManager)
+    mock_mgr.get_collections_hierarchy.return_value = []
+    mock_mgr.get_all_library_tags.return_value = []
+    mock_mgr.config = isolated_test_settings
+
+    dialog = ZoteroDialog(
+        pdf_path=str(pdf_file),
+        zotero_item=None,
+        zotero_manager=mock_mgr,
+    )
+
+    # 1. Verify scroll area configuration
+    assert hasattr(dialog, "meta_scroll")
+    assert dialog.meta_scroll.widgetResizable() is True
+
+    # 2. Default is journalArticle: journal fields visible, preprint fields hidden
+    assert dialog.input_type.currentText() == "journalArticle"
+    assert dialog.meta_form.isRowVisible(dialog.input_publication) is True
+    assert dialog.meta_form.isRowVisible(dialog.input_volume) is True
+    assert dialog.meta_form.isRowVisible(dialog.input_issue) is True
+    assert dialog.meta_form.isRowVisible(dialog.input_pages) is True
+    assert dialog.meta_form.isRowVisible(dialog.input_repository) is False
+    assert dialog.meta_form.isRowVisible(dialog.input_archive_id) is False
+    assert dialog.meta_form.isRowVisible(dialog.input_genre) is False
+    assert dialog.meta_form.isRowVisible(dialog.input_publisher) is False
+
+    dialog.input_title.setText("Attention Is All You Need")
+    dialog.input_authors.setText("Vaswani, Ashish; Shazeer, Noam")
+    dialog.input_publication.setText("arXiv")
+
+    # 3. Switch to 'preprint': preprint fields become visible, journal publication/volume/issue/pages hidden
+    dialog.input_type.setCurrentText("preprint")
+    assert dialog.meta_form.isRowVisible(dialog.input_repository) is True
+    assert dialog.meta_form.isRowVisible(dialog.input_archive_id) is True
+    assert dialog.meta_form.isRowVisible(dialog.input_genre) is True
+    assert dialog.meta_form.isRowVisible(dialog.input_publication) is False
+    assert dialog.meta_form.isRowVisible(dialog.input_volume) is False
+    assert dialog.meta_form.isRowVisible(dialog.input_issue) is False
+    assert dialog.meta_form.isRowVisible(dialog.input_pages) is False
+    assert dialog.meta_form.isRowVisible(dialog.input_publisher) is False
+
+    # Check intelligent migration: "arXiv" was migrated from publication to repository
+    assert dialog.input_repository.text() == "arXiv"
+    assert dialog.input_genre.text() == "Preprint"
+
+    dialog.input_archive_id.setText("arXiv:1706.03762")
+    dialog.input_doi.setText("10.48550/arXiv.1706.03762")
+
+    meta_dict = dialog._get_metadata_dict()
+    assert meta_dict["itemType"] == "preprint"
+    assert meta_dict["title"] == "Attention Is All You Need"
+    assert meta_dict["repository"] == "arXiv"
+    assert meta_dict["archiveID"] == "arXiv:1706.03762"
+    assert meta_dict["genre"] == "Preprint"
+    assert meta_dict["DOI"] == "10.48550/arXiv.1706.03762"
+    assert "publicationTitle" not in meta_dict
+
+    # 4. Switch to 'book': publisher, place, edition, ISBN visible; preprint and journal fields hidden
+    dialog.input_type.setCurrentText("book")
+    assert dialog.meta_form.isRowVisible(dialog.input_publisher) is True
+    assert dialog.meta_form.isRowVisible(dialog.input_place) is True
+    assert dialog.meta_form.isRowVisible(dialog.input_edition) is True
+    assert dialog.meta_form.isRowVisible(dialog.input_isbn) is True
+    assert dialog.meta_form.isRowVisible(dialog.input_numPages) is True
+    assert dialog.meta_form.isRowVisible(dialog.input_repository) is False
+    assert dialog.meta_form.isRowVisible(dialog.input_archive_id) is False
+    assert dialog.meta_form.isRowVisible(dialog.input_publication) is False
+
+    dialog.input_publisher.setText("MIT Press")
+    dialog.input_place.setText("Cambridge, MA")
+    dialog.input_edition.setText("1st")
+    dialog.input_isbn.setText("978-0262035613")
+    book_meta = dialog._get_metadata_dict()
+    assert book_meta["itemType"] == "book"
+    assert book_meta["publisher"] == "MIT Press"
+    assert book_meta["place"] == "Cambridge, MA"
+    assert book_meta["edition"] == "1st"
+    assert book_meta["ISBN"] == "978-0262035613"
+    assert "repository" not in book_meta
+    assert "publicationTitle" not in book_meta
+
+    dialog.close()
+
+
+def test_zotero_dialog_load_existing_preprint(qapp, isolated_test_settings, tmp_path):
+    """
+    Verifies that loading an existing Zotero item with itemType='preprint'
+    properly sets preprint fields and makes repository, archiveID, and genre visible.
+    """
+    pdf_file = tmp_path / "preprint.pdf"
+    pdf_file.write_text("%PDF-1.4 sample")
+
+    mock_mgr = MagicMock(spec=ZoteroManager)
+    mock_mgr.get_collections_hierarchy.return_value = []
+    mock_mgr.get_all_library_tags.return_value = []
+    mock_mgr.get_item_notes.return_value = []
+    mock_mgr.config = isolated_test_settings
+
+    existing_preprint = {
+        "key": "PREPRINT123",
+        "data": {
+            "key": "PREPRINT123",
+            "itemType": "preprint",
+            "title": "Quantum Error Mitigation at Scale",
+            "creators": [{"creatorType": "author", "firstName": "Alice", "lastName": "Smith"}],
+            "repository": "arXiv",
+            "archiveID": "arXiv:2401.99999",
+            "genre": "Preprint",
+            "date": "2024",
+            "DOI": "10.48550/arXiv.2401.99999",
+            "abstractNote": "Mitigating quantum errors.",
+            "url": "https://arxiv.org/abs/2401.99999",
+            "tags": [],
+            "collections": [],
+        }
+    }
+
+    dialog = ZoteroDialog(
+        pdf_path=str(pdf_file),
+        zotero_item=existing_preprint,
+        zotero_manager=mock_mgr,
+    )
+
+    assert dialog.input_type.currentText() == "preprint"
+    assert dialog.input_title.text() == "Quantum Error Mitigation at Scale"
+    assert dialog.input_repository.text() == "arXiv"
+    assert dialog.input_archive_id.text() == "arXiv:2401.99999"
+    assert dialog.input_genre.text() == "Preprint"
+    assert dialog.input_doi.text() == "10.48550/arXiv.2401.99999"
+    assert dialog.input_url.text() == "https://arxiv.org/abs/2401.99999"
+
+    # Verify visibility of preprint fields and invisibility of journal fields
+    assert dialog.meta_form.isRowVisible(dialog.input_repository) is True
+    assert dialog.meta_form.isRowVisible(dialog.input_archive_id) is True
+    assert dialog.meta_form.isRowVisible(dialog.input_genre) is True
+    assert dialog.meta_form.isRowVisible(dialog.input_publication) is False
+    assert dialog.meta_form.isRowVisible(dialog.input_volume) is False
+
+    dialog.close()
 
 

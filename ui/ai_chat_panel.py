@@ -48,11 +48,27 @@ class AIChatPanel(QWidget):
         layout = QVBoxLayout(self)
         layout.setContentsMargins(0, 0, 5, 0)
         
+        # Top Header Bar (Status Bar + Re-index Button on Top Right)
+        top_header_layout = QHBoxLayout()
+        top_header_layout.setContentsMargins(0, 0, 0, 0)
+        top_header_layout.setSpacing(4)
+        
         # Status Bar
         self.status_bar = QLabel()
         self.status_bar.setAlignment(Qt.AlignmentFlag.AlignCenter if hasattr(Qt, 'AlignmentFlag') else Qt.AlignCenter)
-        self.status_bar.setFixedHeight(20)
-        layout.addWidget(self.status_bar)
+        self.status_bar.setFixedHeight(22)
+        top_header_layout.addWidget(self.status_bar, 1)
+
+        # Re-index Button (Top Right)
+        self.reindex_btn = QPushButton("🔄 Re-index")
+        self.reindex_btn.setObjectName("reindexBtn")
+        self.reindex_btn.setToolTip("Re-index the document with the active AI model")
+        self.reindex_btn.setFixedHeight(22)
+        self.reindex_btn.setCursor(Qt.CursorShape.PointingHandCursor)
+        self.reindex_btn.clicked.connect(self._on_reindex_clicked)
+        top_header_layout.addWidget(self.reindex_btn)
+
+        layout.addLayout(top_header_layout)
         
         # Chat History via QWebEngineView
         self.web_view = QWebEngineView()
@@ -197,6 +213,27 @@ class AIChatPanel(QWidget):
         if font_size is not None:
             self.font_size = font_size
             
+        p = ThemeManager.get_palette(self.app_style, self.color_mode)
+        if hasattr(self, "reindex_btn"):
+            self.reindex_btn.setStyleSheet(f"""
+                QPushButton {{
+                    background-color: {p['bg_button']};
+                    color: {p['text_primary']};
+                    border: 1px solid {p['border']};
+                    border-radius: {p['radius']};
+                    padding: 2px 8px;
+                    font-size: 8.5pt;
+                    font-weight: 500;
+                }}
+                QPushButton:hover {{
+                    background-color: {p['bg_button_hover']};
+                }}
+                QPushButton:disabled {{
+                    color: {p['text_secondary']};
+                    border-color: {p['border_subtle']};
+                }}
+            """)
+
         self._refresh_chat_display()
 
     def _get_button_html(self, idx: int):
@@ -328,6 +365,13 @@ class AIChatPanel(QWidget):
         # Scroll to bottom using Javascript
         self.web_view.page().runJavaScript("window.scrollTo(0, document.body.scrollHeight);")
 
+    def _on_reindex_clicked(self):
+        if getattr(self, "is_generating", False):
+            return
+        if hasattr(self, "index_btn"):
+            self.index_btn.setVisible(False)
+        self.index_requested.emit()
+
     def _on_index_clicked(self):
         self.index_btn.setVisible(False)
         self.index_requested.emit()
@@ -349,14 +393,23 @@ class AIChatPanel(QWidget):
         if status == "unloaded":
             self.document_tokens = 0
             self.status_bar.setText("Status: Not Indexed")
-            self.status_bar.setStyleSheet("background-color: #E81123; color: white; padding: 2px; font-size: 9pt; font-weight: bold;")
+            self.status_bar.setStyleSheet("background-color: #E81123; color: white; padding: 2px; font-size: 9pt; font-weight: bold; border-radius: 4px;")
+            if hasattr(self, "reindex_btn"):
+                self.reindex_btn.setEnabled(True)
+                self.reindex_btn.setText("🔄 Re-index")
         elif status == "processing":
             self.status_bar.setText("Status: Indexing in progress...")
-            self.status_bar.setStyleSheet("background-color: #F2A900; color: white; padding: 2px; font-size: 9pt; font-weight: bold;")
+            self.status_bar.setStyleSheet("background-color: #F2A900; color: white; padding: 2px; font-size: 9pt; font-weight: bold; border-radius: 4px;")
+            if hasattr(self, "reindex_btn"):
+                self.reindex_btn.setEnabled(False)
+                self.reindex_btn.setText("🔄 Indexing...")
         elif status == "indexed":
             text = f"Indexed by {model_name}" if model_name else "Indexed"
             self.status_bar.setText(text)
-            self.status_bar.setStyleSheet("background-color: #107C10; color: white; padding: 2px; font-size: 9pt; font-weight: bold;")
+            self.status_bar.setStyleSheet("background-color: #107C10; color: white; padding: 2px; font-size: 9pt; font-weight: bold; border-radius: 4px;")
+            if hasattr(self, "reindex_btn"):
+                self.reindex_btn.setEnabled(True)
+                self.reindex_btn.setText("🔄 Re-index")
         
         self.update_estimated_times()
         
@@ -547,6 +600,12 @@ class AIChatPanel(QWidget):
 
     def add_system_message(self, message: str):
         self.raw_messages.append({"sender": "system", "content": message})
+        self._refresh_chat_display()
+
+    def add_system_error(self, message: str, allow_retry: bool = True):
+        retry_link = '<br><a href="action://retry_last_query" style="color: #ff3b30; font-weight: bold; text-decoration: underline;">[Retry]</a>' if allow_retry else ""
+        error_html = f'<span style="color: #ff3b30; font-weight: bold;">Error:</span> {escape_html(message)}{retry_link}'
+        self.raw_messages.append({"sender": "system", "content": error_html})
         self._refresh_chat_display()
 
     def clear_chat(self):
